@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Detect obfuscation in source code packages"
 license = "MIT"
-repository = "https://github.com/flexatone/disclude-rs"
+repository = "https://github.com/disclude-io/disclude-rs"
 
 [lib]
 name = "disclude"
