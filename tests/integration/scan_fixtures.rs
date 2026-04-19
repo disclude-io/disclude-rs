@@ -89,8 +89,8 @@ fn total_files_scanned_matches_fixture_count() {
     let r = run();
     assert_eq!(
         r.files_scanned,
-        19,
-        "expected 19 fixture files, got {} — files: {:?}",
+        20,
+        "expected 20 fixture files, got {} — files: {:?}",
         r.files_scanned,
         r.files.iter().map(|fa| &fa.path).collect::<Vec<_>>()
     );
@@ -361,6 +361,97 @@ fn rust_clean_fixture_emits_no_findings() {
         clean.findings.is_empty(),
         "rust clean fixture produced findings: {:?}",
         clean.findings
+    );
+}
+
+#[test]
+fn base64_eval_compile_fixture_emits_expected_findings() {
+    // Obfuscation pattern from a real dropper: base64 strings stitched together
+    // through `\xNN`-escaped identifiers, then fed to eval(compile(b64decode(...))).
+    // The scanner should catch both the escape-soup payload construction (raw)
+    // and the decoded value reaching eval/compile (ast).
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("base64_eval_compile.py")
+        })
+        .expect("base64_eval_compile fixture was scanned");
+
+    use disclude::finding::Severity;
+    let by_kind_sev: Vec<(SignalKind, Severity, usize)> = {
+        let mut v: Vec<(SignalKind, Severity, usize)> = Vec::new();
+        for f in &file.findings {
+            match v.iter_mut().find(|e| e.0 == f.kind && e.1 == f.severity) {
+                Some(e) => e.2 += 1,
+                None => v.push((f.kind, f.severity, 1)),
+            }
+        }
+        v.sort_by_key(|e| (e.0 as u8, e.1 as u8));
+        v
+    };
+
+    // Two escape-soup runs on line 7 (the `trust = eval(...) + eval(...) + ...`
+    // chain) and two dynamic-execution hits on line 8 (eval + compile reached
+    // by a decoded value).
+    assert_eq!(
+        file.findings
+            .iter()
+            .filter(|f| f.kind == SignalKind::EncodingEscapeSoup
+                && f.severity == Severity::Warn
+                && f.line == 7)
+            .count(),
+        2,
+        "expected 2 WARN escape-soup findings on line 7, got: {:?}",
+        by_kind_sev
+    );
+    let dyn_exec: Vec<_> = file
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::DynamicExecution)
+        .collect();
+    assert_eq!(
+        dyn_exec.len(),
+        2,
+        "expected 2 dynamic-execution findings (eval + compile), got: {:?}",
+        dyn_exec
+    );
+    assert!(
+        dyn_exec.iter().all(|f| f.severity == Severity::Critical),
+        "both dynamic-execution findings must be CRITICAL, got: {:?}",
+        dyn_exec
+    );
+    assert!(
+        dyn_exec.iter().all(|f| f.line == 8),
+        "dynamic-execution findings should anchor on line 8 (the eval(compile(...)) call)"
+    );
+    assert!(
+        dyn_exec.iter().any(|f| f.message.contains("`eval`")),
+        "expected a finding citing `eval`"
+    );
+    assert!(
+        dyn_exec.iter().any(|f| f.message.contains("`compile`")),
+        "expected a finding citing `compile`"
+    );
+
+    // Full finding set: no other kinds should fire on this fixture. In
+    // particular, the short b64-looking strings (`cHJpbnQ`, `bVxuyoT`, ...)
+    // are below the base64 detector's 64-char threshold and must not trigger.
+    assert_eq!(
+        file.findings.len(),
+        4,
+        "expected exactly 4 findings, got: {:?}",
+        file.findings
+    );
+    assert!(
+        !file
+            .findings
+            .iter()
+            .any(|f| f.kind == SignalKind::EncodingBase64),
+        "short base64-like literals must not trigger the base64 detector"
     );
 }
 
