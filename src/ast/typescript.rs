@@ -312,12 +312,8 @@ fn new_arguments(new_expr: Node) -> Option<Node> {
 
 fn find_child_by_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == kind {
-            return Some(child);
-        }
-    }
-    None
+    let found = node.children(&mut cursor).find(|c| c.kind() == kind);
+    found
 }
 
 fn positional_args(args: Node) -> Vec<Node> {

@@ -203,12 +203,8 @@ fn node_text<'a>(node: Node, bytes: &'a [u8]) -> &'a str {
 
 fn find_child_by_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == kind {
-            return Some(child);
-        }
-    }
-    None
+    let found = node.children(&mut cursor).find(|c| c.kind() == kind);
+    found
 }
 
 /// If the callee is a `generic_function` (`foo::<T>()`), return the underlying
@@ -319,12 +315,7 @@ fn strip_raw_string(raw: &str) -> Option<&str> {
 /// both `"curl"` and `"/usr/bin/curl"` normalize to `curl`.
 fn shell_interpreter(s: &str) -> Option<&'static str> {
     let basename = s.rsplit_once('/').map(|(_, b)| b).unwrap_or(s);
-    for &name in SHELL_INTERPRETERS {
-        if basename == name {
-            return Some(name);
-        }
-    }
-    None
+    SHELL_INTERPRETERS.iter().find(|&&n| basename == n).copied()
 }
 
 /// Pull the attribute path out of an `attribute` node. Accepts both

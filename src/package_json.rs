@@ -69,9 +69,7 @@ fn looks_like_shellout(cmd: &str) -> bool {
     let normalized = cmd
         .replace("&&", " ")
         .replace("||", " ")
-        .replace('|', " ")
-        .replace(';', " ")
-        .replace('&', " ");
+        .replace(['|', ';', '&'], " ");
     for clause in normalized.split_whitespace() {
         let bare = clause.rsplit_once('/').map(|(_, b)| b).unwrap_or(clause);
         if SHELL_BINARIES.contains(&bare) {

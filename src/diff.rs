@@ -133,7 +133,7 @@ diff --git a/x.rs b/x.rs
 -old line 2
 ";
         let map = parse_unified_diff(diff.as_bytes(), &root());
-        assert!(map.get(&root().join("x.rs")).is_none());
+        assert!(!map.contains_key(&root().join("x.rs")));
     }
 
     #[test]
