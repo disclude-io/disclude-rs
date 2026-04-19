@@ -1,0 +1,9 @@
+{
+  "name": "clean-pkg",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "postinstall": "node ./scripts/prepare.js"
+  }
+}
