@@ -95,10 +95,8 @@ fn walk<'a>(
 ) {
     match node.kind() {
         "call_expression" if state.is_build_rs => check_shellout(node, bytes, path, index, state),
-        "attribute_item" | "inner_attribute_item" => {
-            if !state.proc_macro_emitted {
-                check_proc_macro(node, bytes, path, index, state);
-            }
+        "attribute_item" | "inner_attribute_item" if !state.proc_macro_emitted => {
+            check_proc_macro(node, bytes, path, index, state);
         }
         "unsafe_block" => state.contains_unsafe = true,
         _ => {}
