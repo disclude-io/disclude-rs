@@ -109,7 +109,48 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
 // Hex escape runs (`\xNN\xNN...`) — canonical "escape soup"
 // ---------------------------------------------------------------------------
 
-const HEX_ESCAPE_THRESHOLD: usize = 8;
+/// Minimum consecutive `\xNN` escapes before we emit any signal. Was 8;
+/// raised to 16 because short runs collide with binary-format fixtures
+/// (length prefixes, serialized records) that interleave escapes with
+/// ASCII field names and look nothing like encoded payloads.
+const HEX_ESCAPE_THRESHOLD: usize = 16;
+
+/// Minimum Shannon entropy (bits/byte) of the decoded escape bytes before
+/// we emit a finding. Real shellcode and encoded payloads sit at ~7–8
+/// bits/byte. Serialization padding (length prefixes, alignment) and
+/// other structured binary formats sit well below 4. A floor of 3.5
+/// cleanly separates the two without risking true positives.
+const HEX_MIN_ENTROPY_BITS: f32 = 3.5;
+
+fn hex_pair_value(b0: u8, b1: u8) -> u8 {
+    fn nib(b: u8) -> u8 {
+        match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => 0,
+        }
+    }
+    (nib(b0) << 4) | nib(b1)
+}
+
+/// Shannon entropy of a byte histogram, in bits/byte. `total` is the sum
+/// of `hist`. Returns 0 for empty input.
+fn shannon_entropy(hist: &[u32; 256], total: u32) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    let total_f = total as f32;
+    let mut h = 0.0_f32;
+    for &c in hist.iter() {
+        if c == 0 {
+            continue;
+        }
+        let p = c as f32 / total_f;
+        h -= p * p.log2();
+    }
+    h
+}
 
 fn find_hex_escape_runs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -121,36 +162,37 @@ fn find_hex_escape_runs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Fin
             && bytes[i + 3].is_ascii_hexdigit()
         {
             let start = i;
-            let mut count = 0;
+            let mut count = 0u32;
+            let mut hist = [0u32; 256];
             while i + 3 < bytes.len()
                 && bytes[i] == b'\\'
                 && bytes[i + 1] == b'x'
                 && bytes[i + 2].is_ascii_hexdigit()
                 && bytes[i + 3].is_ascii_hexdigit()
             {
+                let v = hex_pair_value(bytes[i + 2], bytes[i + 3]);
+                hist[v as usize] += 1;
                 i += 4;
                 count += 1;
             }
-            if count >= HEX_ESCAPE_THRESHOLD {
+            if count as usize >= HEX_ESCAPE_THRESHOLD {
+                let entropy = shannon_entropy(&hist, count);
+                if entropy < HEX_MIN_ENTROPY_BITS {
+                    continue;
+                }
                 let (line, col) = index.locate(start);
                 // Separate signal for the "encoding-soup" sense — we only
                 // emit one Finding per run; pick the escape-soup kind for
                 // long runs, hex for anything above threshold.
-                let (kind, severity, confidence, message) = if count >= 24 {
-                    (
-                        SignalKind::EncodingEscapeSoup,
-                        Severity::Warn,
-                        0.80,
-                        format!("{} consecutive `\\xNN` escapes", count),
-                    )
+                let (kind, severity, confidence) = if count >= 24 {
+                    (SignalKind::EncodingEscapeSoup, Severity::Warn, 0.80)
                 } else {
-                    (
-                        SignalKind::EncodingHex,
-                        Severity::Warn,
-                        0.65,
-                        format!("{} consecutive `\\xNN` escapes", count),
-                    )
+                    (SignalKind::EncodingHex, Severity::Warn, 0.65)
                 };
+                let message = format!(
+                    "{} consecutive `\\xNN` escapes (entropy {:.1} bits/byte)",
+                    count, entropy
+                );
                 findings.push(Finding {
                     path: path.to_path_buf(),
                     byte_offset: start,
@@ -185,7 +227,8 @@ mod tests {
     #[test]
     fn flags_long_base64_blob() {
         // 88-char blob (mixed case, digits) — realistic payload length.
-        let blob = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=";
+        let blob =
+            "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=";
         let src = format!("data = \"{}\"\n", blob);
         let findings = run(src.as_bytes());
         assert!(
@@ -213,7 +256,9 @@ mod tests {
 
     #[test]
     fn flags_hex_escape_run() {
-        let src = br#"payload = b"\xde\xad\xbe\xef\x01\x02\x03\x04\x05\x06""#;
+        // 16 high-entropy escapes — at threshold, no null dominance.
+        let src =
+            br#"payload = b"\xde\xad\xbe\xef\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c""#;
         let findings = run(src);
         assert!(findings.iter().any(|f| f.kind == SignalKind::EncodingHex));
     }
@@ -223,6 +268,77 @@ mod tests {
         let src = br#"x = b"\xde\xad""#;
         let findings = run(src);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn ignores_sub_threshold_hex_run() {
+        // 10 escapes — above the old threshold of 8, below the new 16.
+        let src = br#"x = b"\xde\xad\xbe\xef\x01\x02\x03\x04\x05\x06""#;
+        let findings = run(src);
+        assert!(
+            findings.is_empty(),
+            "10-escape run should be below threshold: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn ignores_low_entropy_run_of_repeated_byte() {
+        // 20 escapes, all \x00 — pure padding. Entropy = 0.
+        let src = br#"b = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00""#;
+        let findings = run(src);
+        assert!(
+            !findings.iter().any(|f| matches!(
+                f.kind,
+                SignalKind::EncodingHex | SignalKind::EncodingEscapeSoup
+            )),
+            "zero-entropy run must not trigger: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn ignores_low_entropy_run_of_two_values() {
+        // 20 escapes alternating between two values — entropy ≈ 1 bit/byte.
+        let src = br#"b = b"\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01\x00\x01""#;
+        let findings = run(src);
+        assert!(
+            !findings.iter().any(|f| matches!(
+                f.kind,
+                SignalKind::EncodingHex | SignalKind::EncodingEscapeSoup
+            )),
+            "low-entropy alternation must not trigger: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn high_entropy_run_triggers_finding() {
+        // 16 distinct escape values — entropy = 4.0 bits/byte, above the floor.
+        let src = br#"b = b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff""#;
+        let findings = run(src);
+        assert!(
+            findings.iter().any(|f| f.kind == SignalKind::EncodingHex),
+            "high-entropy run should trigger: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn shannon_entropy_is_zero_for_single_value() {
+        let mut hist = [0u32; 256];
+        hist[0] = 20;
+        assert_eq!(shannon_entropy(&hist, 20), 0.0);
+    }
+
+    #[test]
+    fn shannon_entropy_is_max_for_uniform_distribution() {
+        let mut hist = [0u32; 256];
+        for slot in hist.iter_mut().take(16) {
+            *slot = 1;
+        }
+        let h = shannon_entropy(&hist, 16);
+        assert!((h - 4.0).abs() < 0.01, "expected ~4.0 bits, got {}", h);
     }
 
     #[test]
@@ -256,10 +372,8 @@ mod tests {
     fn uppercase_only_hex_is_not_base64() {
         let src = b"x = \"A9BE99C9D2AB6F60294F2931BC875833993CE3F4D41D8DA1684D4C27AA7C8E4\"\n";
         let findings = run(src);
-        assert!(
-            !findings
-                .iter()
-                .any(|f| f.kind == SignalKind::EncodingBase64)
-        );
+        assert!(!findings
+            .iter()
+            .any(|f| f.kind == SignalKind::EncodingBase64));
     }
 }
