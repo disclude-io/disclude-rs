@@ -31,6 +31,55 @@ const MIN_LITERAL_LEN: usize = 128;
 const WARN_RATIO: f32 = 0.95;
 const CRITICAL_RATIO: f32 = 0.98;
 
+fn compression_ratio(bytes: &[u8]) -> f32 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(bytes)
+        .expect("in-memory deflate write never fails");
+    let compressed = encoder
+        .finish()
+        .expect("in-memory deflate finish never fails");
+    compressed.len() as f32 / bytes.len() as f32
+}
+
+/// Coarse single-line quoted-span detector. Returns (content_start,
+/// content_end) byte offsets — the bytes *between* the quotes, not including
+/// them. Backslash escapes are consumed as two bytes. Unterminated or
+/// multi-line strings are skipped.
+fn find_string_literals(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' || b == b'\'' {
+            let quote = b;
+            i += 1;
+            let content_start = i;
+            while i < bytes.len() && bytes[i] != quote && bytes[i] != b'\n' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < bytes.len() && bytes[i] == quote {
+                out.push((content_start, i));
+                i += 1;
+            } else {
+                // Unterminated or newline hit: bail to after the opening
+                // quote rather than re-scanning the skipped region.
+                i = content_start;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 pub fn analyze(path: &Path, bytes: &[u8], index: &LineIndex) -> (Vec<Finding>, (f32, f32)) {
     let literals = find_string_literals(bytes);
     let mut ratios: Vec<(usize, usize, f32)> = Vec::new(); // (content_start, content_end, ratio)
@@ -111,20 +160,6 @@ pub fn analyze(path: &Path, bytes: &[u8], index: &LineIndex) -> (Vec<Finding>, (
     (findings, (mean, max))
 }
 
-fn compression_ratio(bytes: &[u8]) -> f32 {
-    if bytes.is_empty() {
-        return 0.0;
-    }
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(bytes)
-        .expect("in-memory deflate write never fails");
-    let compressed = encoder
-        .finish()
-        .expect("in-memory deflate finish never fails");
-    compressed.len() as f32 / bytes.len() as f32
-}
-
 fn stats(ratios: &[(usize, usize, f32)]) -> (f32, f32, f32) {
     if ratios.is_empty() {
         return (0.0, 0.0, 0.0);
@@ -144,41 +179,7 @@ fn stats(ratios: &[(usize, usize, f32)]) -> (f32, f32, f32) {
     (mean, stddev, max)
 }
 
-/// Coarse single-line quoted-span detector. Returns (content_start,
-/// content_end) byte offsets — the bytes *between* the quotes, not including
-/// them. Backslash escapes are consumed as two bytes. Unterminated or
-/// multi-line strings are skipped.
-fn find_string_literals(bytes: &[u8]) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'"' || b == b'\'' {
-            let quote = b;
-            i += 1;
-            let content_start = i;
-            while i < bytes.len() && bytes[i] != quote && bytes[i] != b'\n' {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            if i < bytes.len() && bytes[i] == quote {
-                out.push((content_start, i));
-                i += 1;
-            } else {
-                // Unterminated or newline hit: bail to after the opening
-                // quote rather than re-scanning the skipped region.
-                i = content_start;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
+//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
