@@ -80,10 +80,7 @@ fn build_results(result: &ScanResult, threshold: Severity) -> Vec<Value> {
 
 fn finding_to_result(f: &Finding, uri: &str) -> Value {
     let mut properties = Map::new();
-    properties.insert(
-        "confidence".into(),
-        Value::from(f64::from(f.confidence)),
-    );
+    properties.insert("confidence".into(), Value::from(f64::from(f.confidence)));
     properties.insert("pass".into(), Value::from(pass_str(f.pass)));
     properties.insert("diffIntroduced".into(), Value::from(f.diff_introduced));
     if !f.snippet.is_empty() {
@@ -200,7 +197,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
     match k {
         SignalKind::UnicodeBidi => "Bidirectional control character (Trojan Source class)",
         SignalKind::UnicodeZeroWidth => "Zero-width character in identifier or string",
-        SignalKind::UnicodeMixedScript => "Identifier mixes characters from multiple Unicode scripts",
+        SignalKind::UnicodeMixedScript => {
+            "Identifier mixes characters from multiple Unicode scripts"
+        }
         SignalKind::UnicodeHomoglyph => "Identifier contains confusable homoglyph characters",
         SignalKind::EncodingBase64 => "Base64-shaped blob in a string literal",
         SignalKind::EncodingHex => "Long run of hex-escape sequences in a string literal",
@@ -208,13 +207,19 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::HighComplexity => "String literal with high entropy (high compression ratio)",
         SignalKind::LongLine => "Line length in a non-minified file exceeds threshold",
         SignalKind::WhitespaceAnomaly => "Unusual whitespace in indentation",
-        SignalKind::IdentifierNarrowCharset => "Identifier uses only visually confusable characters",
+        SignalKind::IdentifierNarrowCharset => {
+            "Identifier uses only visually confusable characters"
+        }
         SignalKind::IdentifierLowLength => "File-wide mean identifier length is unusually short",
-        SignalKind::StringConcatConstruction => "String concatenation reconstructs a sensitive identifier",
+        SignalKind::StringConcatConstruction => {
+            "String concatenation reconstructs a sensitive identifier"
+        }
         SignalKind::DynamicExecution => "exec/eval/Function/setTimeout invoked on a non-literal",
         SignalKind::DynamicImport => "Import or require with a constructed specifier",
         SignalKind::DynamicAttribute => "Attribute access by runtime-constructed name",
-        SignalKind::BuildScriptShellout => "build.rs spawns a shell or network client at compile time",
+        SignalKind::BuildScriptShellout => {
+            "build.rs spawns a shell or network client at compile time"
+        }
         SignalKind::ProcMacroPresence => "Crate defines a proc-macro (runs at compile time)",
         SignalKind::InstallHookShellout => "package.json install hook shells out",
     }

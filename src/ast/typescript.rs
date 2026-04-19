@@ -390,7 +390,8 @@ fn looks_concatenated_string(node: Node, bytes: &[u8]) -> bool {
         if op_text == "+" {
             let l = node.child_by_field_name("left").or_else(|| node.child(0));
             let r = node.child_by_field_name("right").or_else(|| node.child(2));
-            if l.map(is_string_literal).unwrap_or(false) || r.map(is_string_literal).unwrap_or(false)
+            if l.map(is_string_literal).unwrap_or(false)
+                || r.map(is_string_literal).unwrap_or(false)
             {
                 return true;
             }
@@ -621,7 +622,11 @@ mod tests {
 
     #[test]
     fn parse_error_tolerated() {
-        let result = analyze(&PathBuf::from("bad.ts"), b"const x = (", Language::TypeScript);
+        let result = analyze(
+            &PathBuf::from("bad.ts"),
+            b"const x = (",
+            Language::TypeScript,
+        );
         let _ = result.parse_error;
     }
 }

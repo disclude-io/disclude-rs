@@ -113,13 +113,7 @@ fn walk<'a>(
 // BuildScriptShellout
 // ---------------------------------------------------------------------------
 
-fn check_shellout(
-    call: Node,
-    bytes: &[u8],
-    path: &Path,
-    index: &LineIndex,
-    state: &mut State,
-) {
+fn check_shellout(call: Node, bytes: &[u8], path: &Path, index: &LineIndex, state: &mut State) {
     let Some(func) = call.child_by_field_name("function") else {
         return;
     };

@@ -553,8 +553,9 @@ mod tests {
     #[test]
     fn globals_subscript_with_variable_warns() {
         let findings = run(b"v = globals()[name]\n");
-        assert!(findings.iter().any(|f| f.kind == SignalKind::DynamicAttribute
-            && f.severity == Severity::Warn));
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::DynamicAttribute && f.severity == Severity::Warn));
     }
 
     #[test]

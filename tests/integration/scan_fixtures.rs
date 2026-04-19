@@ -163,7 +163,8 @@ fn rust_build_rs_fixture_emits_shellout_critical() {
         "expected BuildScriptShellout finding on rust/build.rs"
     );
     assert!(
-        hits.iter().all(|f| f.severity == disclude::finding::Severity::Critical),
+        hits.iter()
+            .all(|f| f.severity == disclude::finding::Severity::Critical),
         "BuildScriptShellout must be Critical"
     );
 }
@@ -196,7 +197,11 @@ fn ts_eval_dynamic_fixture_emits_dynamic_execution_critical() {
     let file = r
         .files
         .iter()
-        .find(|fa| fa.path.to_string_lossy().ends_with("typescript/eval_dynamic.ts"))
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/eval_dynamic.ts")
+        })
         .expect("typescript/eval_dynamic.ts fixture was scanned");
     let hits: Vec<_> = file
         .findings
@@ -204,7 +209,8 @@ fn ts_eval_dynamic_fixture_emits_dynamic_execution_critical() {
         .filter(|f| f.kind == SignalKind::DynamicExecution)
         .collect();
     assert!(
-        hits.iter().any(|f| f.severity == disclude::finding::Severity::Critical),
+        hits.iter()
+            .any(|f| f.severity == disclude::finding::Severity::Critical),
         "expected at least one CRITICAL DynamicExecution finding, got: {:?}",
         hits
     );
@@ -223,7 +229,11 @@ fn ts_require_dynamic_fixture_emits_findings() {
     let file = r
         .files
         .iter()
-        .find(|fa| fa.path.to_string_lossy().ends_with("typescript/require_dynamic.js"))
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/require_dynamic.js")
+        })
         .expect("typescript/require_dynamic.js fixture was scanned");
     assert!(
         file.findings
@@ -245,7 +255,11 @@ fn ts_process_binding_fixture_emits_dynamic_attribute() {
     let file = r
         .files
         .iter()
-        .find(|fa| fa.path.to_string_lossy().ends_with("typescript/process_binding.js"))
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/process_binding.js")
+        })
         .expect("typescript/process_binding.js fixture was scanned");
     assert!(
         file.findings
@@ -293,7 +307,11 @@ fn clean_package_json_emits_no_install_hook_findings() {
     let file = r
         .files
         .iter()
-        .find(|fa| fa.path.to_string_lossy().ends_with("clean_pkg/package.json"))
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("clean_pkg/package.json")
+        })
         .expect("clean_pkg/package.json fixture was scanned");
     assert!(
         file.findings
@@ -310,7 +328,11 @@ fn rust_unsafe_plus_warn_is_elevated_to_critical() {
     let file = r
         .files
         .iter()
-        .find(|fa| fa.path.to_string_lossy().ends_with("rust/unsafe_with_warn.rs"))
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("rust/unsafe_with_warn.rs")
+        })
         .expect("rust/unsafe_with_warn.rs fixture was scanned");
     // Without elevation, the base64 blob would be Warn. The scorer must
     // flip it to Critical because the same file contains an unsafe block.
