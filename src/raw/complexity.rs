@@ -6,7 +6,6 @@
 //! string recognition (including raw strings, triple-quoted Python strings,
 //! TS template literals, etc.).
 //!
-//! Deviation from SPEC.md §Compression ratio implementation:
 //!   * We use raw DEFLATE rather than zlib-framed compression. zlib adds ~6
 //!     bytes of header + Adler-32 trailer which dominates the ratio on short
 //!     inputs and produces critical-severity findings on ordinary format

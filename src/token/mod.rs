@@ -86,6 +86,43 @@ fn token_at(tokens: &[Token], offset: usize) -> Option<&Token> {
     }
 }
 
+/// Byte offset of the newline terminating the line containing `start`, or
+/// `bytes.len()` if the line is the last and unterminated.
+fn line_end_from(bytes: &[u8], start: usize) -> usize {
+    bytes[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| start + i)
+        .unwrap_or(bytes.len())
+}
+
+/// Sum the bytes of `[line_start, line_end)` that lie inside a string
+/// literal or comment token. Used to decide whether a long line is
+/// actually a long code line vs. a long-string-literal fixture.
+fn string_comment_coverage(tokens: &[Token], line_start: usize, line_end: usize) -> usize {
+    let mut idx = match tokens.binary_search_by_key(&line_start, |t| t.start) {
+        Ok(i) => i,
+        Err(0) => 0,
+        Err(i) => i - 1, // preceding token may extend into the line
+    };
+    let mut total = 0usize;
+    while idx < tokens.len() {
+        let t = &tokens[idx];
+        if t.start >= line_end {
+            break;
+        }
+        if matches!(t.kind, TokenKind::StringLiteral | TokenKind::Comment) {
+            let overlap_start = t.start.max(line_start);
+            let overlap_end = t.end.min(line_end);
+            if overlap_end > overlap_start {
+                total += overlap_end - overlap_start;
+            }
+        }
+        idx += 1;
+    }
+    total
+}
+
 // ---------------------------------------------------------------------------
 // Reclassification of raw findings
 // ---------------------------------------------------------------------------
@@ -101,10 +138,9 @@ fn token_at(tokens: &[Token], offset: usize) -> Option<&Token> {
 ///   * UnicodeBidi stays CRITICAL everywhere — bidi overrides are the one
 ///     attack where location does not mitigate.
 fn reclassify(bytes: &[u8], findings: Vec<Finding>, tokens: &[Token]) -> Vec<Finding> {
-    let _ = bytes; // reserved for future context-sensitive heuristics
     findings
         .into_iter()
-        .map(|mut f| {
+        .filter_map(|mut f| {
             let ctx = token_at(tokens, f.byte_offset).map(|t| t.kind);
             match f.kind {
                 SignalKind::HighComplexity
@@ -145,9 +181,31 @@ fn reclassify(bytes: &[u8], findings: Vec<Finding>, tokens: &[Token]) -> Vec<Fin
                         f.message = format!("{} (in string/comment)", f.message);
                     }
                 }
+                SignalKind::LongLine => {
+                    // The raw pass anchors the finding at the start of the
+                    // line, so we can measure the whole line's token coverage
+                    // directly from byte_offset.
+                    let line_start = f.byte_offset;
+                    let line_end = line_end_from(bytes, line_start);
+                    let line_len = line_end.saturating_sub(line_start);
+                    if line_len > 0 {
+                        let coverage = string_comment_coverage(tokens, line_start, line_end);
+                        let fraction = coverage as f32 / line_len as f32;
+                        if fraction > 0.8 {
+                            // Mostly a string literal or comment — almost
+                            // always a test fixture or embedded data blob.
+                            return None;
+                        }
+                        if fraction > 0.5 && f.severity == Severity::Warn {
+                            f.severity = Severity::Info;
+                            f.confidence = (f.confidence * 0.6).max(0.20);
+                            f.message = format!("{} (mostly string/comment)", f.message);
+                        }
+                    }
+                }
                 _ => {}
             }
-            f
+            Some(f)
         })
         .collect()
 }
@@ -355,6 +413,70 @@ fn emit_concat_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::finding::{PassKind, SignalKind};
+    use std::path::PathBuf;
+
+    fn make_long_line_finding(byte_offset: usize, severity: Severity) -> Finding {
+        Finding {
+            path: PathBuf::from("fixture.py"),
+            byte_offset,
+            line: 1,
+            col: 1,
+            pass: PassKind::Raw,
+            kind: SignalKind::LongLine,
+            severity,
+            confidence: 0.5,
+            message: "line length N bytes".to_string(),
+            snippet: String::new(),
+            diff_introduced: false,
+        }
+    }
+
+    #[test]
+    fn long_line_is_suppressed_when_mostly_string_literal() {
+        // One long line: `x = "..................."` — quotes cover > 80%.
+        let bytes = b"x = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n";
+        let tokens = vec![Token {
+            kind: TokenKind::StringLiteral,
+            start: 4,
+            end: bytes.len() - 1,
+            content_start: 5,
+            content_end: bytes.len() - 2,
+        }];
+        let f = make_long_line_finding(0, Severity::Info);
+        let out = reclassify(bytes, vec![f], &tokens);
+        assert!(out.is_empty(), "expected LongLine to be suppressed");
+    }
+
+    #[test]
+    fn long_line_warn_demoted_to_info_when_half_string() {
+        // Line is "abcdefghij" + "STRINGSTRI" (half code, half string literal).
+        let bytes = b"abcdefghij\"STRINGSTR\"\n";
+        let tokens = vec![Token {
+            kind: TokenKind::StringLiteral,
+            start: 10,
+            end: 21,
+            content_start: 11,
+            content_end: 20,
+        }];
+        let f = make_long_line_finding(0, Severity::Warn);
+        let out = reclassify(bytes, vec![f], &tokens);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].severity, Severity::Info);
+        assert!(out[0].message.contains("mostly string/comment"));
+    }
+
+    #[test]
+    fn long_line_preserved_when_code_dominates() {
+        // Mostly bare code, no tokens covering most of the line.
+        let bytes = b"let a = 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10;\n";
+        let tokens: Vec<Token> = Vec::new();
+        let f = make_long_line_finding(0, Severity::Info);
+        let out = reclassify(bytes, vec![f], &tokens);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].severity, Severity::Info);
+        assert!(!out[0].message.contains("mostly string/comment"));
+    }
 
     #[test]
     fn token_at_finds_enclosing_span() {
