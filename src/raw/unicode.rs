@@ -138,7 +138,17 @@ fn script_of(c: char) -> Option<Script> {
     let cp = c as u32;
     let s = match cp {
         0x0041..=0x005A | 0x0061..=0x007A => Script::Latin,
+        // Latin-1 Supplement letter-property stragglers that sit below the
+        // main accented range: U+00AA (feminine ordinal), U+00B5 (micro
+        // sign — universally used in scientific code as µs / µm / µF),
+        // U+00BA (masculine ordinal). All are Latin-context.
+        0x00AA | 0x00B5 | 0x00BA => Script::Latin,
         0x00C0..=0x024F | 0x1E00..=0x1EFF => Script::Latin, // Latin Supplement + Extended
+        // U+03BC GREEK SMALL LETTER MU is overwhelmingly used as the
+        // scientific "micro" prefix (numpy dtypes like `timedelta64[μs]`,
+        // units like `μm`, `μg`). No Latin homoglyph partner, so not a
+        // spoofing risk. Classify as Latin for script-mixing purposes.
+        0x03BC => Script::Latin,
         0x0370..=0x03FF | 0x1F00..=0x1FFF => Script::Greek,
         0x0400..=0x052F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F => Script::Cyrillic,
         0x0530..=0x058F => Script::Armenian,
@@ -375,5 +385,61 @@ mod tests {
         let src = "\u{FEFF}x = 1\n".as_bytes();
         let findings = run(src);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn micro_sign_is_latin_not_mixed_script() {
+        // `µs` (U+00B5 + s) — scientific "microseconds" shorthand.
+        let src = "label = \"\u{00B5}s\"\n".as_bytes();
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::UnicodeMixedScript),
+            "µs should not be mixed-script: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn greek_mu_is_latin_not_mixed_script() {
+        // `μs` with U+03BC — numpy-style dtype `timedelta64[μs]`.
+        let src = "dt = \"\u{03BC}s\"\n".as_bytes();
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::UnicodeMixedScript),
+            "Greek mu as micro prefix should not be mixed-script: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn other_greek_letters_still_mix() {
+        // Real Greek-plus-Latin should still trigger — only μ is exempted.
+        let src = "var\u{03B1}lpha = 1\n".as_bytes();
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::UnicodeMixedScript),
+            "Greek alpha + Latin should still be mixed-script: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn ordinal_indicators_are_latin() {
+        // U+00AA + U+00BA — feminine/masculine ordinals used alongside Latin.
+        let src = "x = \"1\u{00AA} y 2\u{00BA}z\"\n".as_bytes();
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::UnicodeMixedScript),
+            "ordinal indicators should not be mixed-script: {:?}",
+            findings
+        );
     }
 }
