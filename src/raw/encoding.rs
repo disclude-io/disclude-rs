@@ -59,26 +59,25 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
         }
         let end = i;
         let len = end - start;
-        if len <= 32 {
+        // Minimum length 64: below this we hit mostly hashes, session IDs,
+        // wheel-RECORD sha256 tags, cache keys. A real obfuscated-code
+        // payload is hundreds of bytes. Anything entropic that slips
+        // through here is still caught by the HighComplexity pass.
+        if len < 64 {
             continue;
         }
 
         let span = &bytes[start..end];
-        // Require both letters and digits — rules out long identifiers and
-        // long pure-hex strings (which hex-escape code picks up separately).
-        let has_letter = span.iter().any(|b| b.is_ascii_alphabetic());
+        // Require BOTH uppercase AND lowercase letters. Hex digests
+        // (sha1/sha256) and git refs are the dominant false-positive class
+        // and are always single-case; real base64 of ≥32 random bytes
+        // contains both cases with probability ≈ 1. Also ensures a digit
+        // is present, which rules out long identifiers.
+        let has_upper = span.iter().any(|b| b.is_ascii_uppercase());
+        let has_lower = span.iter().any(|b| b.is_ascii_lowercase());
         let has_digit = span.iter().any(|b| b.is_ascii_digit());
-        if !(has_letter && has_digit) {
+        if !(has_upper && has_lower && has_digit) {
             continue;
-        }
-        // Base64 payloads are essentially always length ≡ 0 or 2 or 3 mod 4
-        // (with or without `=` padding). A pure random alphanum run of e.g.
-        // length 41 is unlikely to be base64.
-        if len < 40 {
-            // Below the strong-signal threshold, require length-mod-4 shape.
-            if len % 4 == 1 {
-                continue;
-            }
         }
         let ratio = compression_ratio(span);
         if ratio < 0.85 {
@@ -185,8 +184,8 @@ mod tests {
 
     #[test]
     fn flags_long_base64_blob() {
-        // 48 base64-char blob with mixed letters and digits.
-        let blob = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwQUJDRA==";
+        // 88-char blob (mixed case, digits) — realistic payload length.
+        let blob = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=";
         let src = format!("data = \"{}\"\n", blob);
         let findings = run(src.as_bytes());
         assert!(
@@ -194,6 +193,20 @@ mod tests {
                 .iter()
                 .any(|f| f.kind == SignalKind::EncodingBase64),
             "expected base64 finding, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn ignores_short_base64_like_metadata() {
+        // 50-char wheel-RECORD style hash — too short to be a real obfuscated payload.
+        let src = b"record = \"WHEEL,sha256=G16H4A3IeoQmnOrYV4ueZGKSjhipXx8zc8nu9FGlvMA\"\n";
+        let findings = run(src);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::EncodingBase64),
+            "short base64-like metadata must not trigger: {:?}",
             findings
         );
     }
@@ -210,5 +223,43 @@ mod tests {
         let src = br#"x = b"\xde\xad""#;
         let findings = run(src);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn sha256_hex_digest_is_not_base64() {
+        // 64-char lowercase hex digest — the dominant false-positive class.
+        let src = b"hash = \"a9be99c9d2ab6f60294f2931bc875833993ce3f4d41d8da1684d4c27aa7c8e4\"\n";
+        let findings = run(src);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::EncodingBase64),
+            "hex digest must not trigger base64: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn sha1_git_ref_is_not_base64() {
+        let src = b"rev = \"cf2cbe2aec28f87c6228a6fb136c27931c9af407\"\n";
+        let findings = run(src);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::EncodingBase64),
+            "git sha1 must not trigger base64: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn uppercase_only_hex_is_not_base64() {
+        let src = b"x = \"A9BE99C9D2AB6F60294F2931BC875833993CE3F4D41D8DA1684D4C27AA7C8E4\"\n";
+        let findings = run(src);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::EncodingBase64)
+        );
     }
 }

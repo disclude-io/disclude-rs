@@ -32,9 +32,10 @@ pub fn render(result: &ScanResult, threshold: Severity, writer: &mut dyn Write) 
             let new_marker = if f.diff_introduced { "[NEW] " } else { "" };
             writeln!(
                 writer,
-                "{:<9} {:<32} {:<26} {}{}",
+                "{:<9} {:<32}:\n{:<10}{} {}{}",
                 severity,
                 location,
+                "",
                 f.kind.as_str(),
                 new_marker,
                 f.message,

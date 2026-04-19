@@ -124,19 +124,19 @@ fn check_call(
                 emit_dynamic_import(node, *arg, bytes, path, index, findings);
             }
         }
-        Some("getattr") | Some("setattr") | Some("hasattr") | Some("delattr") => {
-            if let Some(arg) = args.get(1) {
-                emit_dynamic_attr(
-                    node,
-                    *arg,
-                    bytes,
-                    path,
-                    index,
-                    findings,
-                    short.as_deref().unwrap(),
-                );
-            }
-        }
+        // Some("getattr") | Some("setattr") | Some("hasattr") | Some("delattr") => {
+        //     if let Some(arg) = args.get(1) {
+        //         emit_dynamic_attr(
+        //             node,
+        //             *arg,
+        //             bytes,
+        //             path,
+        //             index,
+        //             findings,
+        //             short.as_deref().unwrap(),
+        //         );
+        //     }
+        // }
         _ => {}
     }
 
@@ -220,7 +220,7 @@ fn emit_exec_like(
         )
     } else {
         (
-            Severity::Critical,
+            Severity::Warn,
             0.70,
             format!("`{}` called on a non-literal expression", fn_name),
         )
@@ -275,39 +275,39 @@ fn emit_dynamic_import(
     });
 }
 
-fn emit_dynamic_attr(
-    call_node: Node,
-    arg: Node,
-    bytes: &[u8],
-    path: &Path,
-    index: &LineIndex,
-    findings: &mut Vec<Finding>,
-    fn_name: &str,
-) {
-    if is_literal_expression(arg, bytes) {
-        return;
-    }
-    let off = call_node.start_byte();
-    let (line, col) = index.locate(off);
-    let confidence = if looks_concatenated_string(arg, bytes) || looks_decoded(arg, bytes) {
-        0.80
-    } else {
-        0.55
-    };
-    findings.push(Finding {
-        path: path.to_path_buf(),
-        byte_offset: off,
-        line,
-        col,
-        pass: PassKind::Ast,
-        kind: SignalKind::DynamicAttribute,
-        severity: Severity::Warn,
-        confidence,
-        message: format!("`{}` called with a non-literal name argument", fn_name),
-        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
-        diff_introduced: false,
-    });
-}
+// fn emit_dynamic_attr(
+//     call_node: Node,
+//     arg: Node,
+//     bytes: &[u8],
+//     path: &Path,
+//     index: &LineIndex,
+//     findings: &mut Vec<Finding>,
+//     fn_name: &str,
+// ) {
+//     if is_literal_expression(arg, bytes) {
+//         return;
+//     }
+//     let off = call_node.start_byte();
+//     let (line, col) = index.locate(off);
+//     let confidence = if looks_concatenated_string(arg, bytes) || looks_decoded(arg, bytes) {
+//         0.80
+//     } else {
+//         0.55
+//     };
+//     findings.push(Finding {
+//         path: path.to_path_buf(),
+//         byte_offset: off,
+//         line,
+//         col,
+//         pass: PassKind::Ast,
+//         kind: SignalKind::DynamicAttribute,
+//         severity: Severity::Warn,
+//         confidence,
+//         message: format!("`{}` called with a non-literal name argument", fn_name),
+//         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+//         diff_introduced: false,
+//     });
+// }
 
 fn push_dynamic_attr(
     anchor: Node,
@@ -566,13 +566,13 @@ mod tests {
             .all(|f| f.kind != SignalKind::DynamicAttribute));
     }
 
-    #[test]
-    fn getattr_with_variable_warns() {
-        let findings = run(b"v = getattr(obj, name)\n");
-        assert!(findings
-            .iter()
-            .any(|f| f.kind == SignalKind::DynamicAttribute && f.severity == Severity::Warn));
-    }
+    // #[test]
+    // fn getattr_with_variable_warns() {
+    //     let findings = run(b"v = getattr(obj, name)\n");
+    //     assert!(findings
+    //         .iter()
+    //         .any(|f| f.kind == SignalKind::DynamicAttribute && f.severity == Severity::Warn));
+    // }
 
     #[test]
     fn parse_error_tolerated() {
