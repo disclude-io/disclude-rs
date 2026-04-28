@@ -485,8 +485,7 @@ fn emit_surrogate_escape_findings(
                     .filter(|&&(lo, lcp)| lo == off + 6 && (0xDC00..=0xDFFF).contains(&lcp));
 
                 if let Some(&(_, low_cp)) = paired {
-                    let combined =
-                        0x10000 + (cp - 0xD800) * 0x400 + (low_cp - 0xDC00);
+                    let combined = 0x10000 + (cp - 0xD800) * 0x400 + (low_cp - 0xDC00);
                     let (line, col) = index.locate(abs);
                     let (severity, confidence, message) = if is_tag_codepoint(combined) {
                         (
@@ -597,13 +596,7 @@ mod tests {
     fn run_surrogate(src: &[u8], lang: Language) -> Vec<Finding> {
         let idx = LineIndex::new(src);
         let tokens = tokenize(src, lang);
-        emit_surrogate_escape_findings(
-            &PathBuf::from("test.js"),
-            src,
-            &idx,
-            lang,
-            &tokens,
-        )
+        emit_surrogate_escape_findings(&PathBuf::from("test.js"), src, &idx, lang, &tokens)
     }
 
     #[test]

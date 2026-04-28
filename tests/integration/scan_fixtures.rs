@@ -283,7 +283,10 @@ fn ts_tag_smuggling_fixture_emits_unicode_surrogate() {
     let hit = file
         .findings
         .iter()
-        .find(|f| f.kind == SignalKind::UnicodeSurrogate && f.severity >= disclude::finding::Severity::Warn)
+        .find(|f| {
+            f.kind == SignalKind::UnicodeSurrogate
+                && f.severity >= disclude::finding::Severity::Warn
+        })
         .expect("expected Warn UnicodeSurrogate from surrogate pair decoding to tag char");
     assert!(
         hit.message.contains("E0041"),
