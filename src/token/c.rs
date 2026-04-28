@@ -65,22 +65,24 @@ pub fn tokenize(bytes: &[u8]) -> Vec<Token> {
             let start = i;
             let content_start = i + 2;
             i += 2;
+            let mut closed = false;
             while i + 1 < n {
                 if bytes[i] == b'*' && bytes[i + 1] == b'/' {
                     i += 2;
+                    closed = true;
                     break;
                 }
                 i += 1;
             }
-            if i + 1 >= n && !(i > 0 && bytes[i - 1] == b'/' && i >= 2 && bytes[i - 2] == b'*') {
-                i = n; // unterminated
+            if !closed {
+                i = n; // unterminated — swallow to EOF
             }
             out.push(Token {
                 kind: TokenKind::Comment,
                 start,
                 end: i,
                 content_start,
-                content_end: i.saturating_sub(2).max(content_start),
+                content_end: if closed { i - 2 } else { i },
             });
             continue;
         }
