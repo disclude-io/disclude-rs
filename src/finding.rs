@@ -18,6 +18,8 @@ pub enum SignalKind {
     // raw
     UnicodeBidi,
     UnicodeZeroWidth,
+    UnicodeInvisible,
+    UnicodeSurrogate,
     UnicodeMixedScript,
     UnicodeHomoglyph,
     EncodingBase64,
@@ -44,6 +46,8 @@ impl SignalKind {
         match self {
             SignalKind::UnicodeBidi => "unicode-bidi",
             SignalKind::UnicodeZeroWidth => "unicode-zero-width",
+            SignalKind::UnicodeInvisible => "unicode-invisible",
+            SignalKind::UnicodeSurrogate => "unicode-surrogate",
             SignalKind::UnicodeMixedScript => "unicode-mixed-script",
             SignalKind::UnicodeHomoglyph => "unicode-homoglyph",
             SignalKind::EncodingBase64 => "encoding-base64",

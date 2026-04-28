@@ -269,6 +269,30 @@ fn ts_process_binding_fixture_emits_dynamic_attribute() {
 }
 
 #[test]
+fn ts_tag_smuggling_fixture_emits_unicode_surrogate() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/tag_smuggling.js")
+        })
+        .expect("typescript/tag_smuggling.js fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::UnicodeSurrogate && f.severity >= disclude::finding::Severity::Warn)
+        .expect("expected Warn UnicodeSurrogate from surrogate pair decoding to tag char");
+    assert!(
+        hit.message.contains("E0041"),
+        "finding should identify U+E0041, got: {}",
+        hit.message
+    );
+}
+
+#[test]
 fn ts_clean_fixture_emits_no_findings() {
     let r = run();
     let clean = r
@@ -507,6 +531,35 @@ fn c_dlopen_fixture_emits_dynamic_import_and_attribute() {
             .iter()
             .any(|f| f.kind == SignalKind::DynamicAttribute),
         "expected DynamicAttribute from dlsym(h, name) call"
+    );
+}
+
+#[test]
+fn c_salmon_fixture_emits_unicode_invisible() {
+    // IOCCC 2024 "cable2/salmon": invisible Unicode Tag characters embedded in
+    // macro names and inline code make the program behave differently from what
+    // it visually appears to do.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/salmon.c"))
+        .expect("c/salmon.c fixture was scanned");
+    assert!(
+        file.findings
+            .iter()
+            .any(|f| f.kind == SignalKind::UnicodeInvisible),
+        "expected UnicodeInvisible findings in salmon.c, got: {:?}",
+        file.findings
+    );
+    // The tag chars embedded directly in code (not inside string/comment tokens)
+    // must remain at Warn or higher.
+    assert!(
+        file.findings
+            .iter()
+            .any(|f| f.kind == SignalKind::UnicodeInvisible
+                && f.severity >= disclude::finding::Severity::Warn),
+        "expected at least one Warn-level UnicodeInvisible finding"
     );
 }
 

@@ -60,6 +60,9 @@ pub fn analyze(
     let mut findings = reclassify(bytes, raw_findings, &tokens);
     findings.extend(emit_identifier_findings(path, bytes, index, lang, &tokens));
     findings.extend(emit_concat_findings(path, bytes, index, lang, &tokens));
+    findings.extend(emit_surrogate_escape_findings(
+        path, bytes, index, lang, &tokens,
+    ));
     findings
 }
 
@@ -173,7 +176,7 @@ fn reclassify(bytes: &[u8], findings: Vec<Finding>, tokens: &[Token]) -> Vec<Fin
                         f.message = format!("{} (in string/comment)", f.message);
                     }
                 }
-                SignalKind::UnicodeZeroWidth => {
+                SignalKind::UnicodeZeroWidth | SignalKind::UnicodeInvisible => {
                     if matches!(
                         ctx,
                         Some(TokenKind::Comment) | Some(TokenKind::StringLiteral)
@@ -413,6 +416,160 @@ fn emit_concat_findings(
     findings
 }
 
+// ---------------------------------------------------------------------------
+// Surrogate-pair escape sequence detection
+// ---------------------------------------------------------------------------
+//
+// JavaScript/TypeScript runtimes recombine adjacent \uHHHH escape sequences
+// for surrogate pairs into a single supplementary codepoint. The pair
+// \uDB40\uDCxx decodes to a Unicode Tags block character (U+E0000–U+E007F),
+// which is invisible and has no legitimate use in source code.
+//
+// This check only applies to JS/TS; other languages either reject lone
+// surrogates at compile time (Rust) or do not recombine them (Python 3).
+
+fn is_tag_codepoint(cp: u32) -> bool {
+    cp == 0xE0001 || matches!(cp, 0xE0020..=0xE007F)
+}
+
+/// Scan `content` (raw bytes of a string literal, between the quotes) for
+/// `\uHHHH` escape sequences. Returns `(offset_in_content, codepoint)` for
+/// each one found. The offset points at the leading `\`.
+fn scan_u4_escapes(content: &[u8]) -> Vec<(usize, u32)> {
+    let mut out = Vec::new();
+    let n = content.len();
+    let mut i = 0;
+    while i + 6 <= n {
+        if content[i] == b'\\'
+            && content[i + 1] == b'u'
+            && content[i + 2] != b'{'
+            && content[i + 2..i + 6].iter().all(|b| b.is_ascii_hexdigit())
+        {
+            let hex = std::str::from_utf8(&content[i + 2..i + 6]).unwrap_or("");
+            if let Ok(cp) = u32::from_str_radix(hex, 16) {
+                out.push((i, cp));
+                i += 6;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn emit_surrogate_escape_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::TypeScript | Language::JavaScript) {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    for tok in tokens.iter().filter(|t| t.kind == TokenKind::StringLiteral) {
+        let content = &bytes[tok.content_start..tok.content_end];
+        let escapes = scan_u4_escapes(content);
+        let mut i = 0;
+        while i < escapes.len() {
+            let (off, cp) = escapes[i];
+            let abs = tok.content_start + off;
+
+            if (0xD800..=0xDBFF).contains(&cp) {
+                // High surrogate — look for an immediately adjacent low surrogate.
+                // The \uHHHH escape is 6 bytes, so the next one must be at off+6.
+                let paired = escapes
+                    .get(i + 1)
+                    .filter(|&&(lo, lcp)| lo == off + 6 && (0xDC00..=0xDFFF).contains(&lcp));
+
+                if let Some(&(_, low_cp)) = paired {
+                    let combined =
+                        0x10000 + (cp - 0xD800) * 0x400 + (low_cp - 0xDC00);
+                    let (line, col) = index.locate(abs);
+                    let (severity, confidence, message) = if is_tag_codepoint(combined) {
+                        (
+                            Severity::Warn,
+                            0.92,
+                            format!(
+                                "surrogate pair \\u{:04X}\\u{:04X} decodes to \
+                                 U+{:05X} (invisible tag character)",
+                                cp, low_cp, combined
+                            ),
+                        )
+                    } else {
+                        (
+                            Severity::Info,
+                            0.70,
+                            format!(
+                                "surrogate pair \\u{:04X}\\u{:04X} (non-scalar \
+                                 Unicode codepoints in string literal)",
+                                cp, low_cp
+                            ),
+                        )
+                    };
+                    findings.push(Finding {
+                        path: path.to_path_buf(),
+                        byte_offset: abs,
+                        line,
+                        col,
+                        pass: PassKind::Token,
+                        kind: SignalKind::UnicodeSurrogate,
+                        severity,
+                        confidence,
+                        message,
+                        snippet: crate::finding::redact_snippet(&snippet_around(bytes, abs, 80)),
+                        diff_introduced: false,
+                    });
+                    i += 2;
+                    continue;
+                }
+
+                // Orphaned high surrogate.
+                let (line, col) = index.locate(abs);
+                findings.push(Finding {
+                    path: path.to_path_buf(),
+                    byte_offset: abs,
+                    line,
+                    col,
+                    pass: PassKind::Token,
+                    kind: SignalKind::UnicodeSurrogate,
+                    severity: Severity::Info,
+                    confidence: 0.65,
+                    message: format!(
+                        "orphaned high surrogate \\u{:04X} (no matching low surrogate)",
+                        cp
+                    ),
+                    snippet: crate::finding::redact_snippet(&snippet_around(bytes, abs, 80)),
+                    diff_introduced: false,
+                });
+            } else if (0xDC00..=0xDFFF).contains(&cp) {
+                // Orphaned low surrogate (no preceding high).
+                let (line, col) = index.locate(abs);
+                findings.push(Finding {
+                    path: path.to_path_buf(),
+                    byte_offset: abs,
+                    line,
+                    col,
+                    pass: PassKind::Token,
+                    kind: SignalKind::UnicodeSurrogate,
+                    severity: Severity::Info,
+                    confidence: 0.65,
+                    message: format!(
+                        "orphaned low surrogate \\u{:04X} (no preceding high surrogate)",
+                        cp
+                    ),
+                    snippet: crate::finding::redact_snippet(&snippet_around(bytes, abs, 80)),
+                    diff_introduced: false,
+                });
+            }
+            i += 1;
+        }
+    }
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +590,87 @@ mod tests {
             snippet: String::new(),
             diff_introduced: false,
         }
+    }
+
+    // --- surrogate escape detection ---
+
+    fn run_surrogate(src: &[u8], lang: Language) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, lang);
+        emit_surrogate_escape_findings(
+            &PathBuf::from("test.js"),
+            src,
+            &idx,
+            lang,
+            &tokens,
+        )
+    }
+
+    #[test]
+    fn surrogate_pair_decoding_to_tag_char_is_warn() {
+        // 󠁁 is the JS escape sequence for U+E0041
+        // (TAG LATIN CAPITAL LETTER A — invisible).
+        let src = b"const x = \"\\uDB40\\uDC41\";";
+        let findings = run_surrogate(src, Language::JavaScript);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::UnicodeSurrogate && f.severity == Severity::Warn)
+            .expect("expected Warn UnicodeSurrogate for tag-char pair");
+        assert!(
+            hit.message.contains("E0041"),
+            "message should cite U+E0041, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn surrogate_pair_not_tag_char_is_info() {
+        // 😀 decodes to U+1F600 GRINNING FACE (emoji, not a tag char).
+        let src = b"const x = \"\\uD83D\\uDE00\";";
+        let findings = run_surrogate(src, Language::JavaScript);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::UnicodeSurrogate)
+            .expect("expected UnicodeSurrogate for emoji surrogate pair");
+        assert_eq!(hit.severity, Severity::Info);
+    }
+
+    #[test]
+    fn orphaned_high_surrogate_is_info() {
+        let src = b"const x = \"\\uDB40\";";
+        let findings = run_surrogate(src, Language::JavaScript);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::UnicodeSurrogate)
+            .expect("expected UnicodeSurrogate for orphaned high surrogate");
+        assert_eq!(hit.severity, Severity::Info);
+        assert!(hit.message.contains("orphaned high"));
+    }
+
+    #[test]
+    fn orphaned_low_surrogate_is_info() {
+        let src = b"const x = \"\\uDC41\";";
+        let findings = run_surrogate(src, Language::JavaScript);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::UnicodeSurrogate)
+            .expect("expected UnicodeSurrogate for orphaned low surrogate");
+        assert_eq!(hit.severity, Severity::Info);
+        assert!(hit.message.contains("orphaned low"));
+    }
+
+    #[test]
+    fn clean_string_emits_no_surrogate_findings() {
+        let src = b"const x = \"hello world\";";
+        let findings = run_surrogate(src, Language::JavaScript);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn surrogate_check_skipped_for_python() {
+        let src = b"x = \"\\uDB40\\uDC41\"";
+        let findings = run_surrogate(src, Language::Python);
+        assert!(findings.is_empty());
     }
 
     #[test]

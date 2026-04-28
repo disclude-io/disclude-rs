@@ -150,6 +150,8 @@ fn uri_from_root(result: &ScanResult) -> String {
 const ALL_KINDS: &[SignalKind] = &[
     SignalKind::UnicodeBidi,
     SignalKind::UnicodeZeroWidth,
+    SignalKind::UnicodeInvisible,
+    SignalKind::UnicodeSurrogate,
     SignalKind::UnicodeMixedScript,
     SignalKind::UnicodeHomoglyph,
     SignalKind::EncodingBase64,
@@ -173,6 +175,8 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
     match k {
         SignalKind::UnicodeBidi => "UnicodeBidi",
         SignalKind::UnicodeZeroWidth => "UnicodeZeroWidth",
+        SignalKind::UnicodeInvisible => "UnicodeInvisible",
+        SignalKind::UnicodeSurrogate => "UnicodeSurrogate",
         SignalKind::UnicodeMixedScript => "UnicodeMixedScript",
         SignalKind::UnicodeHomoglyph => "UnicodeHomoglyph",
         SignalKind::EncodingBase64 => "EncodingBase64",
@@ -197,6 +201,12 @@ fn kind_short_description(k: SignalKind) -> &'static str {
     match k {
         SignalKind::UnicodeBidi => "Bidirectional control character (Trojan Source class)",
         SignalKind::UnicodeZeroWidth => "Zero-width character in identifier or string",
+        SignalKind::UnicodeInvisible => {
+            "Unicode Tags block character used as invisible identifier or hidden content"
+        }
+        SignalKind::UnicodeSurrogate => {
+            "Surrogate pair escape sequence that decodes to an invisible tag character"
+        }
         SignalKind::UnicodeMixedScript => {
             "Identifier mixes characters from multiple Unicode scripts"
         }

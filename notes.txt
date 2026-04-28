@@ -1,0 +1,9 @@
+
+
+Note:
+
+
+## Unicode character smuggling
+
+https://aws.amazon.com/blogs/security/defending-llm-applications-against-unicode-character-smuggling/
+

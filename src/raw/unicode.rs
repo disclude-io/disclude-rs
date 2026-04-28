@@ -16,6 +16,7 @@ pub fn analyze(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
 
     let mut findings = Vec::new();
     findings.extend(scan_bidi_and_zero_width(path, bytes, text, index));
+    findings.extend(scan_tag_chars(path, bytes, text, index));
     findings.extend(scan_identifiers(path, bytes, text, index));
     findings
 }
@@ -100,6 +101,57 @@ fn scan_bidi_and_zero_width(
                 severity: Severity::Warn,
                 confidence: 0.75,
                 message: format!("{} in source", zero_width_name(c)),
+                snippet: redact_snippet(&snippet_around(bytes, offset, 80)),
+                diff_introduced: false,
+            });
+        }
+    }
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// Unicode Tags block scan (U+E0001, U+E0020–U+E007F)
+// ---------------------------------------------------------------------------
+//
+// The Tags block contains invisible "tag" variants of ASCII printable chars.
+// They have no legitimate use in source code; their only known use is
+// obfuscation — e.g. IOCCC 2024 "salmon" embeds them in macro names and
+// inline code to change program behaviour invisibly.
+
+fn is_tag_char(c: char) -> bool {
+    let cp = c as u32;
+    // U+E0001 LANGUAGE TAG; U+E0020–U+E007F tag variants of ASCII 0x20–0x7F.
+    cp == 0xE0001 || matches!(cp, 0xE0020..=0xE007F)
+}
+
+fn tag_char_name(c: char) -> String {
+    let cp = c as u32;
+    match cp {
+        0xE0001 => "U+E0001 LANGUAGE TAG".to_string(),
+        0xE007F => "U+E007F CANCEL TAG".to_string(),
+        0xE0020..=0xE007E => {
+            let ascii = (cp - 0xE0000) as u8 as char;
+            format!("U+{:05X} TAG {:?}", cp, ascii)
+        }
+        _ => format!("U+{:05X} invisible tag character", cp),
+    }
+}
+
+fn scan_tag_chars(path: &Path, bytes: &[u8], text: &str, index: &LineIndex) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (offset, c) in text.char_indices() {
+        if is_tag_char(c) {
+            let (line, col) = index.locate(offset);
+            findings.push(Finding {
+                path: path.to_path_buf(),
+                byte_offset: offset,
+                line,
+                col,
+                pass: PassKind::Raw,
+                kind: SignalKind::UnicodeInvisible,
+                severity: Severity::Warn,
+                confidence: 0.90,
+                message: format!("{} in source", tag_char_name(c)),
                 snippet: redact_snippet(&snippet_around(bytes, offset, 80)),
                 diff_introduced: false,
             });
@@ -342,6 +394,32 @@ mod tests {
     fn run(src: &[u8]) -> Vec<Finding> {
         let idx = LineIndex::new(src);
         analyze(&PathBuf::from("test.py"), src, &idx)
+    }
+
+    #[test]
+    fn flags_tag_char_in_code() {
+        // U+E0041 TAG LATIN CAPITAL LETTER A embedded in an identifier.
+        let src = "let x\u{E0041} = 1;\n".as_bytes();
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::UnicodeInvisible),
+            "expected UnicodeInvisible for tag char in identifier"
+        );
+    }
+
+    #[test]
+    fn flags_language_tag_char() {
+        // U+E0001 LANGUAGE TAG.
+        let src = "fn foo\u{E0001}() {}\n".as_bytes();
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::UnicodeInvisible),
+            "expected UnicodeInvisible for U+E0001 language tag"
+        );
     }
 
     #[test]
