@@ -89,33 +89,29 @@ pub fn tokenize(bytes: &[u8]) -> Vec<Token> {
         // String literals — optional prefix (L, u8, u, U) then `"`.
         // Wide / Unicode prefixes: skip the prefix bytes before the quote.
         let str_prefix_len = string_prefix_len(bytes, i);
-        if str_prefix_len > 0
-            || (b == b'"')
-        {
-            if b == b'"' || (str_prefix_len > 0 && bytes.get(i + str_prefix_len) == Some(&b'"')) {
-                let start = i;
-                let quote_pos = i + str_prefix_len;
-                let content_start = quote_pos + 1;
-                i = content_start;
-                while i < n && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' {
-                        i += 1; // skip escaped char
-                    }
-                    i += 1;
+        if b == b'"' || (str_prefix_len > 0 && bytes.get(i + str_prefix_len) == Some(&b'"')) {
+            let start = i;
+            let quote_pos = i + str_prefix_len;
+            let content_start = quote_pos + 1;
+            i = content_start;
+            while i < n && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1; // skip escaped char
                 }
-                let content_end = i;
-                if i < n {
-                    i += 1; // closing "
-                }
-                out.push(Token {
-                    kind: TokenKind::StringLiteral,
-                    start,
-                    end: i,
-                    content_start,
-                    content_end,
-                });
-                continue;
+                i += 1;
             }
+            let content_end = i;
+            if i < n {
+                i += 1; // closing "
+            }
+            out.push(Token {
+                kind: TokenKind::StringLiteral,
+                start,
+                end: i,
+                content_start,
+                content_end,
+            });
+            continue;
         }
         // Character literals — emit as Other.
         if b == b'\'' {

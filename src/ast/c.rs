@@ -116,7 +116,15 @@ fn check_call(
             check_dlsym(node, positional.as_slice(), bytes, path, index, findings);
         }
         fn_name if EXEC_FUNCTIONS.contains(&fn_name) => {
-            check_exec(node, fn_name, positional.as_slice(), bytes, path, index, findings);
+            check_exec(
+                node,
+                fn_name,
+                positional.as_slice(),
+                bytes,
+                path,
+                index,
+                findings,
+            );
         }
         _ => {}
     }
@@ -152,13 +160,19 @@ fn check_system(
         }
     } else {
         // system() with no args is unusual; flag as Warn.
-        (
-            Severity::Warn,
-            0.60,
-            "`system` called".to_string(),
-        )
+        (Severity::Warn, 0.60, "`system` called".to_string())
     };
-    push(findings, call, bytes, path, index, SignalKind::DynamicExecution, severity, confidence, message);
+    push(
+        findings,
+        call,
+        bytes,
+        path,
+        index,
+        SignalKind::DynamicExecution,
+        severity,
+        confidence,
+        message,
+    );
 }
 
 /// `exec*(path, ...)` — direct process replacement. Non-literal path → CRITICAL.
@@ -186,13 +200,19 @@ fn check_exec(
             )
         }
     } else {
-        (
-            Severity::Warn,
-            0.60,
-            format!("`{}` called", fn_name),
-        )
+        (Severity::Warn, 0.60, format!("`{}` called", fn_name))
     };
-    push(findings, call, bytes, path, index, SignalKind::DynamicExecution, severity, confidence, message);
+    push(
+        findings,
+        call,
+        bytes,
+        path,
+        index,
+        SignalKind::DynamicExecution,
+        severity,
+        confidence,
+        message,
+    );
 }
 
 /// `popen(cmd, mode)` — runs a shell command. Always WARN.
@@ -219,13 +239,19 @@ fn check_popen(
             )
         }
     } else {
-        (
-            Severity::Warn,
-            0.60,
-            "`popen` called".to_string(),
-        )
+        (Severity::Warn, 0.60, "`popen` called".to_string())
     };
-    push(findings, call, bytes, path, index, SignalKind::DynamicExecution, severity, confidence, message);
+    push(
+        findings,
+        call,
+        bytes,
+        path,
+        index,
+        SignalKind::DynamicExecution,
+        severity,
+        confidence,
+        message,
+    );
 }
 
 /// `dlopen(path, flags)` — dynamically loads a library. Non-literal path → WARN.
@@ -438,7 +464,9 @@ mod tests {
     fn dlsym_literal_is_ignored() {
         let src = b"void f(void *h) { dlsym(h, \"func\"); }\n";
         let findings = run(src);
-        assert!(findings.iter().all(|f| f.kind != SignalKind::DynamicAttribute));
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicAttribute));
     }
 
     #[test]
@@ -456,7 +484,11 @@ mod tests {
     fn unrelated_call_is_ignored() {
         let src = b"int main() { printf(\"hello\\n\"); return 0; }\n";
         let findings = run(src);
-        assert!(findings.is_empty(), "expected no findings, got: {:?}", findings);
+        assert!(
+            findings.is_empty(),
+            "expected no findings, got: {:?}",
+            findings
+        );
     }
 
     #[test]
