@@ -88,8 +88,8 @@ fn clean_fixture_emits_no_findings() {
 fn total_files_scanned_matches_fixture_count() {
     let r = run();
     assert!(
-        r.files_scanned >= 18,
-        "expected at least 18 fixture files, got {} — files: {:?}",
+        r.files_scanned >= 21,
+        "expected at least 21 fixture files, got {} — files: {:?}",
         r.files_scanned,
         r.files.iter().map(|fa| &fa.path).collect::<Vec<_>>()
     );
@@ -470,4 +470,57 @@ fn base64_fixture_finding_stays_warn_inside_string() {
         .find(|f| f.kind == SignalKind::EncodingBase64)
         .expect("base64 finding present");
     assert_eq!(b64.severity, disclude::finding::Severity::Warn);
+}
+
+#[test]
+fn c_shellout_fixture_emits_dynamic_execution_critical() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/shellout.c"))
+        .expect("c/shellout.c fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution)
+        .expect("expected DynamicExecution finding on c/shellout.c");
+    assert_eq!(hit.severity, disclude::finding::Severity::Critical);
+}
+
+#[test]
+fn c_dlopen_fixture_emits_dynamic_import_and_attribute() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/dlopen_dlsym.c"))
+        .expect("c/dlopen_dlsym.c fixture was scanned");
+    assert!(
+        file.findings
+            .iter()
+            .any(|f| f.kind == SignalKind::DynamicImport),
+        "expected DynamicImport from dlopen(path, ...) call"
+    );
+    assert!(
+        file.findings
+            .iter()
+            .any(|f| f.kind == SignalKind::DynamicAttribute),
+        "expected DynamicAttribute from dlsym(h, name) call"
+    );
+}
+
+#[test]
+fn c_clean_fixture_emits_no_findings() {
+    let r = run();
+    let clean = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/clean.c"))
+        .expect("c/clean.c fixture was scanned");
+    assert!(
+        clean.findings.is_empty(),
+        "c clean fixture produced findings: {:?}",
+        clean.findings
+    );
 }
