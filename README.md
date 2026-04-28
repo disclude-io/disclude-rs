@@ -1,8 +1,6 @@
 # disclude
 
-Scan a source tree for signs that code is hiding its intent from a human reader — Unicode attacks, encoded payloads, dynamic execution patterns, and build-time escape hatches.
-
-Not a vulnerability scanner. Not a secrets detector. The goal is to surface the techniques that supply-chain attackers use to make malicious code look benign on review.
+Scan a (C, Rust, Python, Typescript) source tree for signs that code is hiding its intent from a human reader: Unicode attacks, encoded payloads, dynamic execution patterns, and build-time escape hatches. This is not a general purpose vulnerability scanner. This is a tool to surface the techniques used to make malicious code look benign on review.
 
 ## Install
 
