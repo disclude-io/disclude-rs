@@ -6,13 +6,14 @@
 //! deliberately tolerant of parse errors: we record the error on the
 //! `FileAnalysis` and walk whatever tree is available.
 //!
-//! Python, Rust, and TypeScript/JavaScript walkers are all wired up.
+//! Python, Rust, TypeScript/JavaScript, and C walkers are all wired up.
 
 use std::path::Path;
 
 use crate::finding::Finding;
 use crate::language::Language;
 
+pub mod c;
 pub mod python;
 pub mod rust;
 pub mod typescript;
@@ -37,6 +38,7 @@ pub struct AstOutcome {
 
 pub fn analyze(path: &Path, bytes: &[u8], lang: Language) -> AstOutcome {
     match lang {
+        Language::C => c::analyze(path, bytes),
         Language::Python => python::analyze(path, bytes),
         Language::Rust => rust::analyze(path, bytes),
         Language::TypeScript | Language::JavaScript => typescript::analyze(path, bytes, lang),

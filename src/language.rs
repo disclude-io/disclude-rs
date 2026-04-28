@@ -4,6 +4,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
+    C,
     Python,
     Rust,
     TypeScript,
@@ -14,6 +15,7 @@ impl Language {
     pub fn from_extension(path: &Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?;
         match ext {
+            "c" | "h" => Some(Language::C),
             "py" | "pyi" => Some(Language::Python),
             "rs" => Some(Language::Rust),
             "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
@@ -46,6 +48,7 @@ impl Language {
 
     pub fn parse_flag(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
+            "c" => Some(Language::C),
             "python" | "py" => Some(Language::Python),
             "rust" | "rs" => Some(Language::Rust),
             "ts" | "typescript" => Some(Language::TypeScript),
@@ -56,6 +59,7 @@ impl Language {
 
     pub fn as_str(&self) -> &'static str {
         match self {
+            Language::C => "c",
             Language::Python => "python",
             Language::Rust => "rust",
             Language::TypeScript => "typescript",
