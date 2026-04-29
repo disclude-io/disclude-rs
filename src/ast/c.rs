@@ -457,7 +457,9 @@ fn check_numeric_payload_casts(
     let mut cursor = root.walk();
     walk_casts(root, bytes, arrays, &mut hits, &mut cursor);
     for (i, hit) in hits.iter().enumerate() {
-        let Some((offset, count)) = *hit else { continue };
+        let Some((offset, count)) = *hit else {
+            continue;
+        };
         let arr = &arrays[i];
         let (line, col) = index.locate(offset);
         let cast_clause = if count == 1 {
@@ -506,18 +508,16 @@ fn walk_casts<'a>(
     }
 }
 
-fn matches_byte_cast_of_array(
-    cast: Node,
-    bytes: &[u8],
-    arrays: &[NumericArray],
-) -> Option<usize> {
+fn matches_byte_cast_of_array(cast: Node, bytes: &[u8], arrays: &[NumericArray]) -> Option<usize> {
     let type_desc = first_child_of_kinds(cast, &["type_descriptor"])?;
     if !is_byte_pointer_type_descriptor(type_desc, bytes) {
         return None;
     }
     let mut names = Vec::new();
     collect_identifiers(cast, bytes, &mut names);
-    arrays.iter().position(|a| names.iter().any(|n| n == &a.name))
+    arrays
+        .iter()
+        .position(|a| names.iter().any(|n| n == &a.name))
 }
 
 fn collect_identifiers(node: Node, bytes: &[u8], out: &mut Vec<String>) {
@@ -596,17 +596,16 @@ fn is_byte_pointer_type_descriptor(type_desc: Node, bytes: &[u8]) -> bool {
                 "primitive_type" | "type_identifier" | "sized_type_specifier"
             )
         })
-        .map(|n| node_text(n, bytes).split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|n| {
+            node_text(n, bytes)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .unwrap_or_default();
     matches!(
         type_part.as_str(),
-        "char"
-            | "unsigned char"
-            | "signed char"
-            | "int8_t"
-            | "uint8_t"
-            | "i8"
-            | "u8"
+        "char" | "unsigned char" | "signed char" | "int8_t" | "uint8_t" | "i8" | "u8"
     )
 }
 

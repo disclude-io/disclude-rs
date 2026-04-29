@@ -769,11 +769,10 @@ mod tests {
     fn ordinary_identifiers_do_not_fire_low_length() {
         // 30 well-formed identifiers, no single-char ones.
         let names = [
-            "config", "parser", "result", "count", "buffer", "writer", "reader",
-            "stream", "source", "target", "value", "index", "limit", "offset",
-            "length", "header", "footer", "client", "server", "request",
-            "response", "context", "session", "manager", "handler", "queue",
-            "worker", "logger", "filter", "encoder",
+            "config", "parser", "result", "count", "buffer", "writer", "reader", "stream",
+            "source", "target", "value", "index", "limit", "offset", "length", "header", "footer",
+            "client", "server", "request", "response", "context", "session", "manager", "handler",
+            "queue", "worker", "logger", "filter", "encoder",
         ];
         let src = names
             .iter()
