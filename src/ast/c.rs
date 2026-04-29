@@ -907,13 +907,13 @@ fn check_legacy_kr_main(
     for (idx, child) in children.iter().enumerate() {
         let kind = child.kind();
         let is_kr = match kind {
-            // Pattern A: simple K&R `main() { ... }` — tree-sitter recovers
-            // as a top-level ERROR (containing the signature) followed by a
-            // `compound_statement`.
+            // Pattern A: K&R `main() { ... }` — tree-sitter recovers the
+            // signature as a top-level ERROR, followed by optional K&R
+            // parameter declarations then a `compound_statement`. Both the
+            // simple `main(){...}` and `main(v,c)char**c;{...}` forms land
+            // here since the char**c declaration appears as a sibling of ERROR.
             "ERROR" => {
-                let next = children.get(idx + 1);
-                next.map(|n| n.kind() == "compound_statement")
-                    .unwrap_or(false)
+                followed_by_compound_after_decls(&children, idx)
                     && first_identifier_text(*child, bytes) == Some("main")
             }
             // Pattern B: heavy-recovery case (notation.c). The function body
@@ -2090,5 +2090,15 @@ main(int c,char *C[]) {
             .filter(|f| f.kind == SignalKind::StringifyDereference)
             .collect();
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn execlp_kr_main_oneliner_fires() {
+        let src = b"main(v,c)char**c;{for(;;){}}";
+        let findings = run(src);
+        assert!(
+            findings.iter().any(|f| f.kind == SignalKind::LegacyKAndRMain),
+            "K&R main on one line should fire: {:?}", findings
+        );
     }
 }
