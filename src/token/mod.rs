@@ -1567,10 +1567,12 @@ fn collect_internal_ws_runs(
 // ---------------------------------------------------------------------------
 //
 // `\<newline>` is the preprocessor line-continuation marker. Real code uses
-// it inside `#define` macros and (rarely) inside long string literals. Using
-// it inside a function body or expression is a strong obfuscation signal —
-// IOCCC entries break expressions across line boundaries to fit a visual
-// shape.
+// it inside `#define` macros and inside string literals. It also legitimately
+// appears in regular C at natural syntactic boundaries (`=`, `{`, `,`, `)` …).
+// The obfuscatory form — as seen in IOCCC entries — breaks an expression
+// mid-token or after an identifier/subscript so the hidden continuation is not
+// visible at a glance.  We therefore only fire when `\` follows an identifier
+// character or `]`, not when it follows operators or punctuation.
 
 fn emit_line_continuation_findings(
     path: &Path,
@@ -1594,22 +1596,46 @@ fn emit_line_continuation_findings(
                 inside,
                 Some(TokenKind::Comment) | Some(TokenKind::StringLiteral)
             ) {
-                let (line, col) = index.locate(i);
-                findings.push(Finding {
-                    path: path.to_path_buf(),
-                    byte_offset: i,
-                    line,
-                    col,
-                    pass: PassKind::Token,
-                    kind: SignalKind::LineContinuationInCode,
-                    severity: Severity::Warn,
-                    confidence: 0.75,
-                    message:
-                        "backslash line continuation in code (not a `#define` or string literal)"
-                            .to_string(),
-                    snippet: crate::finding::redact_snippet(&snippet_around(bytes, i, 60)),
-                    diff_introduced: false,
-                });
+                // Only fire when `\` follows an expression token, not a natural
+                // syntactic break point. IOCCC hides continuations after
+                // identifiers, subscripts `]`, opening parens `(`, or comparison
+                // operators (`==`, `!=`, `<=`, `>=`). Natural break points like
+                // `=` (assignment), `"` (adjacent string literal), `{`, `,`, `?`,
+                // `)`, and arithmetic operators are common in legitimate C code.
+                let mut preceding_iter = bytes[..i]
+                    .iter()
+                    .rev()
+                    .filter(|&&b| b != b' ' && b != b'\t');
+                let p1 = preceding_iter.next().copied();
+                let p2 = preceding_iter.next().copied();
+                let fire = match p1 {
+                    Some(b) if b.is_ascii_alphanumeric() || b == b'_'
+                        || b == b']' || b == b'(' || b == b'[' => true,
+                    // `==`, `!=`, `<=`, `>=` — comparison operators, fire.
+                    // Plain `=` (assignment/compound-assign) — suppress.
+                    Some(b'=') => {
+                        matches!(p2, Some(b'=') | Some(b'!') | Some(b'<') | Some(b'>'))
+                    }
+                    _ => false,
+                };
+                if fire {
+                    let (line, col) = index.locate(i);
+                    findings.push(Finding {
+                        path: path.to_path_buf(),
+                        byte_offset: i,
+                        line,
+                        col,
+                        pass: PassKind::Token,
+                        kind: SignalKind::LineContinuationInCode,
+                        severity: Severity::Warn,
+                        confidence: 0.75,
+                        message:
+                            "backslash line continuation mid-expression (IOCCC-style obfuscation)"
+                                .to_string(),
+                        snippet: crate::finding::redact_snippet(&snippet_around(bytes, i, 60)),
+                        diff_introduced: false,
+                    });
+                }
             }
             i += 2;
             continue;
@@ -2209,13 +2235,43 @@ mod tests {
 
     #[test]
     fn line_continuation_in_expression_is_warn() {
-        let src = b"int main(){int x = 1 + \\\n2; return x;}\n";
+        // `\` follows an identifier — the IOCCC pattern of hiding a continuation
+        // after a token that looks like a complete expression.
+        let src = b"int main(){int x = alpha \\\n+ beta;}\n";
         let findings = run_line_cont(src, Language::C);
         let hit = findings
             .iter()
             .find(|f| f.kind == SignalKind::LineContinuationInCode)
-            .expect("expected LineContinuationInCode for `\\<nl>` in expression");
+            .expect("expected LineContinuationInCode for `\\<nl>` after identifier");
         assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn line_continuation_after_operator_does_not_fire() {
+        // `\` follows an operator — a natural syntactic break point, not obfuscatory.
+        let src = b"int main(){int x = 1 + \\\n2;}\n";
+        let findings = run_line_cont(src, Language::C);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::LineContinuationInCode),
+            "`\\<nl>` after operator must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn line_continuation_after_equals_does_not_fire() {
+        // `\` follows `=` — common in C for long assignments, not obfuscatory.
+        let src = b"int main(){int *p = \\\n    some_func();}\n";
+        let findings = run_line_cont(src, Language::C);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::LineContinuationInCode),
+            "`\\<nl>` after `=` must not fire: {:?}",
+            findings
+        );
     }
 
     #[test]

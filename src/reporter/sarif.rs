@@ -277,7 +277,7 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::LegacyKAndRMain => "main() defined without a return type (pre-ANSI K&R style)",
         SignalKind::LineContinuationInCode => {
-            "Backslash line continuation outside preprocessor or string literal"
+            "Backslash line continuation mid-expression (IOCCC-style obfuscation)"
         }
         SignalKind::ImplicitIntFunction => {
             "Many functions in this file lack an explicit return type (pre-ANSI K&R style)"
