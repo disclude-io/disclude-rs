@@ -64,6 +64,9 @@ pub fn analyze(
         path, bytes, index, lang, &tokens,
     ));
     findings.extend(emit_macro_alias_findings(path, bytes, index, lang, &tokens));
+    findings.extend(emit_format_string_write_findings(
+        path, bytes, index, lang, &tokens,
+    ));
     findings
 }
 
@@ -601,18 +604,14 @@ fn emit_surrogate_escape_findings(
 
 const MACRO_SENSITIVE_NAMES: &[&str] = &[
     // process spawn / replacement
-    "system", "popen", "execl", "execlp", "execle", "execv", "execvp", "execve",
-    "fork", "vfork", "kill", "raise",
-    // dynamic loading
+    "system", "popen", "execl", "execlp", "execle", "execv", "execvp", "execve", "fork", "vfork",
+    "kill", "raise", // dynamic loading
     "dlopen", "dlsym", "dlmopen", "dlclose",
     // direct syscalls (bonsai uses `#define A write`)
-    "write", "read", "open", "openat", "close",
-    // memory protection
-    "mmap", "mprotect", "munmap",
-    // network
-    "socket", "connect", "bind", "accept", "listen",
-    "send", "sendto", "sendmsg", "recv", "recvfrom", "recvmsg",
-    // generic but useful when aliased to a 1-char name
+    "write", "read", "open", "openat", "close", // memory protection
+    "mmap", "mprotect", "munmap", // network
+    "socket", "connect", "bind", "accept", "listen", "send", "sendto", "sendmsg", "recv",
+    "recvfrom", "recvmsg", // generic but useful when aliased to a 1-char name
     "ptrace", "syscall",
 ];
 
@@ -692,6 +691,225 @@ fn parse_define(content: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, replacement))
+}
+
+// ---------------------------------------------------------------------------
+// printf format-string write directive (`%n` family)
+// ---------------------------------------------------------------------------
+//
+// The `%n` conversion writes the count of bytes printed so far into an int*
+// argument — a memory write primitive, virtually always seen in CTF/exploit
+// code. Variants: `%n`, `%hhn` (signed char*), `%hn` (short*), `%ln` (long*),
+// `%lln` (long long*). POSIX positional form: `%<digit>$<length>n`.
+//
+// Bonsai-style obfuscation splits the directive across stringification:
+//   `#define N(a) "%"#a"$hhn"` — the literal `$hhn` appears alone.
+// We catch both the assembled directive and the orphan tail.
+
+fn emit_format_string_write_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::C) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    for tok in tokens {
+        let (text, abs_offset, in_macro) = match tok.kind {
+            TokenKind::StringLiteral => (
+                &bytes[tok.content_start..tok.content_end],
+                tok.content_start,
+                false,
+            ),
+            TokenKind::Comment => {
+                // Only preprocessor `#define` directives — line/block comments
+                // mentioning %n are human discussion, not code.
+                if bytes.get(tok.start) != Some(&b'#') {
+                    continue;
+                }
+                let body = &bytes[tok.content_start..tok.content_end];
+                let Ok(body_str) = std::str::from_utf8(body) else {
+                    continue;
+                };
+                let trimmed = body_str.trim_start();
+                if !(trimmed.starts_with("define ") || trimmed.starts_with("define\t")) {
+                    continue;
+                }
+                (body, tok.content_start, true)
+            }
+            _ => continue,
+        };
+        for (off, dir) in scan_format_n_directives(text) {
+            let abs = abs_offset + off;
+            let (line, col) = index.locate(abs);
+            findings.push(Finding {
+                path: path.to_path_buf(),
+                byte_offset: abs,
+                line,
+                col,
+                pass: PassKind::Token,
+                kind: SignalKind::FormatStringWrite,
+                severity: Severity::Critical,
+                confidence: 0.90,
+                message: format!(
+                    "printf format directive `{}` writes to memory ({})",
+                    dir,
+                    if in_macro {
+                        "in macro definition"
+                    } else {
+                        "in string literal"
+                    }
+                ),
+                snippet: crate::finding::redact_snippet(&snippet_around(bytes, abs, 80)),
+                diff_introduced: false,
+            });
+        }
+    }
+    findings
+}
+
+/// Scan `text` for printf write directives. Returns `(offset, directive_text)`
+/// for each hit. Catches both assembled `%[...]n` directives and the
+/// orphan-tail form `$[hl]+n` produced by stringification splits.
+fn scan_format_n_directives(text: &[u8]) -> Vec<(usize, String)> {
+    let mut hits = Vec::new();
+    let n = text.len();
+    let mut i = 0;
+    while i < n {
+        // Skip `%%` literal percent.
+        if text[i] == b'%' && i + 1 < n && text[i + 1] == b'%' {
+            i += 2;
+            continue;
+        }
+        if text[i] == b'%' {
+            if let Some((dir_len, is_n)) = parse_printf_directive(&text[i..]) {
+                if is_n {
+                    let dir = std::str::from_utf8(&text[i..i + dir_len])
+                        .unwrap_or("?")
+                        .to_string();
+                    hits.push((i, dir));
+                }
+                i += dir_len.max(1);
+                continue;
+            }
+        }
+        // Orphan tail: `$[hl]+n` — fragment of a positional `%<d>$<len>n`
+        // directive stranded by macro stringification splits.
+        if text[i] == b'$' {
+            let len_start = i + 1;
+            let mut j = len_start;
+            while j < n && (text[j] == b'h' || text[j] == b'l') {
+                j += 1;
+            }
+            if j > len_start && j < n && text[j] == b'n' {
+                let dir = std::str::from_utf8(&text[i..=j]).unwrap_or("?").to_string();
+                hits.push((i, dir));
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    hits
+}
+
+/// Parse a printf format directive starting at byte 0 of `tail` (which must
+/// begin with `%`). Returns `(directive_byte_length, conversion_is_n)` if a
+/// complete directive parses, else None.
+fn parse_printf_directive(tail: &[u8]) -> Option<(usize, bool)> {
+    let n = tail.len();
+    if n < 2 || tail[0] != b'%' {
+        return None;
+    }
+    let mut i = 1;
+    // Optional positional argument: [0-9]+\$
+    let mark = i;
+    while i < n && tail[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > mark && i < n && tail[i] == b'$' {
+        i += 1;
+    } else {
+        i = mark;
+    }
+    // Flags
+    while i < n && matches!(tail[i], b'-' | b'+' | b' ' | b'#' | b'0' | b'\'') {
+        i += 1;
+    }
+    // Width
+    if i < n && tail[i] == b'*' {
+        i += 1;
+        let m = i;
+        while i < n && tail[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i > m && i < n && tail[i] == b'$' {
+            i += 1;
+        } else {
+            i = m;
+        }
+    } else {
+        while i < n && tail[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    // Precision
+    if i < n && tail[i] == b'.' {
+        i += 1;
+        if i < n && tail[i] == b'*' {
+            i += 1;
+            let m = i;
+            while i < n && tail[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i > m && i < n && tail[i] == b'$' {
+                i += 1;
+            } else {
+                i = m;
+            }
+        } else {
+            while i < n && tail[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+    }
+    // Length modifier
+    while i < n && matches!(tail[i], b'h' | b'l' | b'j' | b'z' | b't' | b'L' | b'q') {
+        i += 1;
+    }
+    if i >= n {
+        return None;
+    }
+    let conv = tail[i];
+    if !matches!(
+        conv,
+        b'd' | b'i'
+            | b'u'
+            | b'o'
+            | b'x'
+            | b'X'
+            | b'e'
+            | b'E'
+            | b'f'
+            | b'F'
+            | b'g'
+            | b'G'
+            | b'a'
+            | b'A'
+            | b'c'
+            | b's'
+            | b'p'
+            | b'n'
+            | b'C'
+            | b'S'
+            | b'm'
+    ) {
+        return None;
+    }
+    Some((i + 1, conv == b'n'))
 }
 
 fn is_simple_identifier(s: &str) -> bool {
@@ -983,6 +1201,121 @@ mod tests {
         let src = b"#if defined(write)\n#endif\n";
         let findings = run_macro_alias(src, Language::C);
         assert!(findings.iter().all(|f| f.kind != SignalKind::MacroAlias));
+    }
+
+    // --- format-string write directive detection ---
+
+    fn run_fmt_write(src: &[u8], lang: Language) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, lang);
+        emit_format_string_write_findings(&PathBuf::from("test.c"), src, &idx, lang, &tokens)
+    }
+
+    #[test]
+    fn percent_n_in_string_literal_is_critical() {
+        let src = br#"int x; printf("hello%n", &x);"#;
+        let findings = run_fmt_write(src, Language::C);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::FormatStringWrite)
+            .expect("expected FormatStringWrite for %n");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("`%n`"));
+        assert!(hit.message.contains("string literal"));
+    }
+
+    #[test]
+    fn percent_hhn_with_positional_is_critical() {
+        let src = br#"printf("%12$hhn", &c);"#;
+        let findings = run_fmt_write(src, Language::C);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::FormatStringWrite)
+            .expect("expected FormatStringWrite for %12$hhn");
+        assert!(hit.message.contains("`%12$hhn`"));
+    }
+
+    #[test]
+    fn percent_lln_is_critical() {
+        let src = br#"printf("%lln", &n);"#;
+        assert!(run_fmt_write(src, Language::C)
+            .iter()
+            .any(|f| f.kind == SignalKind::FormatStringWrite));
+    }
+
+    #[test]
+    fn ordinary_format_directives_do_not_fire() {
+        let src = br#"printf("%d %s %5.2f %p %x %ld %hhd %12$s\n", a, b, c, d);"#;
+        let findings = run_fmt_write(src, Language::C);
+        assert!(
+            findings.is_empty(),
+            "ordinary directives must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn double_percent_does_not_fire() {
+        let src = br#"printf("100%% done, n=%d\n", n);"#;
+        assert!(run_fmt_write(src, Language::C).is_empty());
+    }
+
+    #[test]
+    fn orphan_tail_in_define_macro_is_critical() {
+        // Bonsai/IOCCC printf style — `$hhn` lives alone inside the macro,
+        // assembled into a `%n` directive after preprocessor stringification.
+        let src = b"#define N(a) \"%\"#a\"$hhn\"\n";
+        let findings = run_fmt_write(src, Language::C);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::FormatStringWrite)
+            .expect("expected FormatStringWrite for orphan $hhn");
+        assert!(hit.message.contains("`$hhn`"));
+        assert!(hit.message.contains("macro definition"));
+    }
+
+    #[test]
+    fn plain_dollar_n_does_not_fire() {
+        // Without a length modifier, `$n` is too common — it's a shell-var
+        // reference in many strings. Require at least one h/l before n.
+        let src = br#"system("echo $name $n");"#;
+        let findings = run_fmt_write(src, Language::C);
+        assert!(findings.is_empty(), "$n must not fire: {:?}", findings);
+    }
+
+    #[test]
+    fn line_comment_mentioning_percent_n_does_not_fire() {
+        let src = b"// printf(\"%n\") writes to memory - never use this\nint x;\n";
+        let findings = run_fmt_write(src, Language::C);
+        assert!(findings.is_empty(), "comment must not fire: {:?}", findings);
+    }
+
+    #[test]
+    fn block_comment_mentioning_percent_n_does_not_fire() {
+        let src = b"/* %n is a memory write directive */\nint x;\n";
+        let findings = run_fmt_write(src, Language::C);
+        assert!(findings.is_empty(), "comment must not fire: {:?}", findings);
+    }
+
+    #[test]
+    fn format_string_write_skipped_for_non_c() {
+        let src = br#"printf("%n", &x)"#;
+        for lang in [Language::Python, Language::Rust, Language::JavaScript] {
+            let findings = run_fmt_write(src, lang);
+            assert!(
+                findings.is_empty(),
+                "FormatStringWrite must only fire for C, fired for {:?}",
+                lang
+            );
+        }
+    }
+
+    #[test]
+    fn parse_directive_accepts_full_grammar() {
+        // Width with star-positional, precision with star-positional,
+        // length modifier, n conversion.
+        let r = parse_printf_directive(b"%1$*2$.*3$lln,");
+        assert_eq!(r, Some((13, true)));
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub enum SignalKind {
     ProcMacroPresence,
     InstallHookShellout,
     NumericLiteralPayload,
+    FormatStringWrite,
 }
 
 impl SignalKind {
@@ -69,6 +70,7 @@ impl SignalKind {
             SignalKind::ProcMacroPresence => "proc-macro-presence",
             SignalKind::InstallHookShellout => "install-hook-shellout",
             SignalKind::NumericLiteralPayload => "numeric-literal-payload",
+            SignalKind::FormatStringWrite => "format-string-write",
         }
     }
 }

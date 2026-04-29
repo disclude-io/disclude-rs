@@ -171,6 +171,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::ProcMacroPresence,
     SignalKind::InstallHookShellout,
     SignalKind::NumericLiteralPayload,
+    SignalKind::FormatStringWrite,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -198,6 +199,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::ProcMacroPresence => "ProcMacroPresence",
         SignalKind::InstallHookShellout => "InstallHookShellout",
         SignalKind::NumericLiteralPayload => "NumericLiteralPayload",
+        SignalKind::FormatStringWrite => "FormatStringWrite",
     }
 }
 
@@ -228,9 +230,7 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::StringConcatConstruction => {
             "String concatenation reconstructs a sensitive identifier"
         }
-        SignalKind::MacroAlias => {
-            "Short C macro name aliases a sensitive function or syscall"
-        }
+        SignalKind::MacroAlias => "Short C macro name aliases a sensitive function or syscall",
         SignalKind::DynamicExecution => "exec/eval/Function/setTimeout invoked on a non-literal",
         SignalKind::DynamicImport => "Import or require with a constructed specifier",
         SignalKind::DynamicAttribute => "Attribute access by runtime-constructed name",
@@ -242,6 +242,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::NumericLiteralPayload => {
             "Wide-numeric array reinterpreted via byte-pointer cast (data smuggling)"
         }
+        SignalKind::FormatStringWrite => {
+            "printf format string contains %n write directive (memory write primitive)"
+        }
     }
 }
 
@@ -251,7 +254,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::DynamicExecution
         | SignalKind::DynamicImport
         | SignalKind::BuildScriptShellout
-        | SignalKind::NumericLiteralPayload => Severity::Critical,
+        | SignalKind::NumericLiteralPayload
+        | SignalKind::FormatStringWrite => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

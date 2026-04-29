@@ -117,7 +117,7 @@ Token pass; language-aware.
 | Signal | Severity | Description |
 |---|---|---|
 | `identifier-narrow-charset` | warn | Identifier composed entirely of visually confusable characters (`l`, `I`, `1`, `O`, `0`). Names like `lI1O0lI` are unreadable by design. |
-| `identifier-low-length` | info | File-wide mean identifier length is unusually short (below 2.0 characters over at least 20 identifiers). Suggests heavy minification or obfuscation. |
+| `identifier-low-length` | info | File-wide naming-shape signal. Fires when the mean non-conventional identifier length is below 2.0 over at least 20 identifiers, **or** when ≥ 40 % of non-conventional identifiers are exactly one character (over at least 30 identifiers). The second trigger catches IOCCC-style obfuscation where a sprinkling of long keywords (`extern`, `nanosleep`, `TIOCGWINSZ`) inflates the mean above 2.0 even though most globals and functions are single letters. |
 | `string-concat-construction` | warn | String concatenation that reconstructs a sensitive identifier (`exec`, `eval`, `import`, `getattr`, `system`, `require`, etc.). A common pattern to dodge static keyword grep. |
 
 ### Dynamic execution — Python
@@ -149,6 +149,14 @@ AST pass; tree-sitter.
 | `dynamic-execution` | critical / warn | `system(cmd)` or `exec*(path, ...)` (`execl`, `execlp`, `execle`, `execv`, `execvp`, `execve`) or `popen(cmd, mode)`. Critical when the argument is a variable; warn when it is a string literal. |
 | `dynamic-import` | warn | `dlopen(path, flags)` with a non-literal path — dynamically loads a shared library. |
 | `dynamic-attribute` | warn | `dlsym(handle, name)` with a non-literal symbol name — resolves a function pointer by name at runtime. |
+
+### C-specific obfuscation
+
+| Signal | Severity | Description |
+|---|---|---|
+| `macro-alias` | warn | Token pass. `#define <name> <replacement>` where the macro name is 1–2 characters and the replacement is a sensitive identifier (`write`, `read`, `open`, `system`, `exec*`, `popen`, `fork`, `kill`, `ptrace`, `syscall`, `dlopen`, `dlsym`, `mmap`, `mprotect`, `socket`, `connect`, `send`, `recv`, …). A common dropper trick: the syscall is renamed to a single letter so that simple keyword grep over the source misses it. Function-like macros and multi-token bodies are excluded. |
+| `numeric-literal-payload` | critical | AST pass. A wide-numeric array (≥ 8 elements of `short`, `int`, `long`, `long long`, `float`, `double`, `long double`, `wchar_t`, `size_t`, `int16_t`/`int32_t`/`int64_t`, `uint16_t`/`uint32_t`/`uint64_t`, `intptr_t`, `uintptr_t`, …) that is later reinterpreted through a byte-pointer cast (`char *`, `unsigned char *`, `signed char *`, `int8_t *`, `uint8_t *`). Hides arbitrary bytes inside what looks like a table of floating-point or integer constants. Findings are deduped per array — one report per array citing the cast count. |
+| `format-string-write` | critical | Token pass. `printf`-family format string contains a `%n` write directive (`%n`, `%hhn`, `%hn`, `%ln`, `%lln`, with optional positional `%<digit>$…n`). The `n` conversion writes the byte-count-so-far into an `int *` argument — a memory write primitive seen almost exclusively in CTF/exploit code and IOCCC entries. Detected inside string literals and inside `#define` macro bodies (catches the IOCCC stringification trick `#define N(a) "%"#a"$hhn"`, where the `$hhn` directive tail is split across stringification). Comments mentioning `%n` are excluded. |
 
 ### Build-time and install-time
 

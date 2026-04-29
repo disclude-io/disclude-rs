@@ -380,6 +380,35 @@ fn c_bonsai_fixture_emits_identifier_low_length() {
 }
 
 #[test]
+fn c_printf_fixture_emits_format_string_write() {
+    // IOCCC printf.c builds %n write directives via macro stringification:
+    // `#define N(a) "%"#a"$hhn"` leaves the literal `$hhn` substring in the
+    // source. The C token pass should flag it CRITICAL.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/printf.c"))
+        .expect("c/printf.c fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::FormatStringWrite)
+        .expect("expected FormatStringWrite finding on printf.c");
+    assert_eq!(hit.severity, disclude::finding::Severity::Critical);
+    assert!(
+        hit.message.contains("$hhn"),
+        "expected message to cite the directive, got: {}",
+        hit.message
+    );
+    assert!(
+        hit.message.contains("macro"),
+        "expected message to cite macro context, got: {}",
+        hit.message
+    );
+}
+
+#[test]
 fn ts_clean_fixture_emits_no_findings() {
     let r = run();
     let clean = r
