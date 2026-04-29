@@ -2097,8 +2097,11 @@ main(int c,char *C[]) {
         let src = b"main(v,c)char**c;{for(;;){}}";
         let findings = run(src);
         assert!(
-            findings.iter().any(|f| f.kind == SignalKind::LegacyKAndRMain),
-            "K&R main on one line should fire: {:?}", findings
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::LegacyKAndRMain),
+            "K&R main on one line should fire: {:?}",
+            findings
         );
     }
 }

@@ -898,15 +898,23 @@ fn ts_recruiter_attack_fixture_emits_base64_and_atob() {
     let file = r
         .files
         .iter()
-        .find(|fa| fa.path.to_string_lossy().ends_with("typescript/recruiter_attack.js"))
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/recruiter_attack.js")
+        })
         .expect("typescript/recruiter_attack.js fixture was scanned");
     assert!(
-        file.findings.iter().any(|f| f.kind == SignalKind::EncodingBase64),
+        file.findings
+            .iter()
+            .any(|f| f.kind == SignalKind::EncodingBase64),
         "expected EncodingBase64 from padded base64 C2 URL: {:?}",
         file.findings
     );
     assert!(
-        file.findings.iter().any(|f| f.kind == SignalKind::DynamicExecution),
+        file.findings
+            .iter()
+            .any(|f| f.kind == SignalKind::DynamicExecution),
         "expected DynamicExecution from atob() call: {:?}",
         file.findings
     );
