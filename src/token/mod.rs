@@ -1609,8 +1609,15 @@ fn emit_line_continuation_findings(
                 let p1 = preceding_iter.next().copied();
                 let p2 = preceding_iter.next().copied();
                 let fire = match p1 {
-                    Some(b) if b.is_ascii_alphanumeric() || b == b'_'
-                        || b == b']' || b == b'(' || b == b'[' => true,
+                    Some(b)
+                        if b.is_ascii_alphanumeric()
+                            || b == b'_'
+                            || b == b']'
+                            || b == b'('
+                            || b == b'[' =>
+                    {
+                        true
+                    }
                     // `==`, `!=`, `<=`, `>=` — comparison operators, fire.
                     // Plain `=` (assignment/compound-assign) — suppress.
                     Some(b'=') => {
