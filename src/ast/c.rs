@@ -102,6 +102,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     check_implicit_int_functions(root, bytes, path, &index, &mut findings);
     check_reverse_subscript_macros(root, bytes, path, &index, &mut findings);
     check_stringify_dereference_macros(root, bytes, path, &index, &mut findings);
+    check_macro_keyword_overrides(root, bytes, path, &index, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -1299,14 +1300,21 @@ fn check_recursive_main(
         return;
     }
     // Also guard against a definition recovered as a top-level
-    // `expression_statement` immediately followed by a `compound_statement`
-    // (the second implicit-int recovery shape used by `check_implicit_int_functions`).
+    // `expression_statement` followed by optional K&R parameter declarations
+    // then a `compound_statement` (Pattern C implicit-int recovery shape).
     if let Some(parent) = call.parent() {
-        if parent.kind() == "expression_statement"
-            && parent.parent().map(|gp| gp.kind()) == Some("translation_unit")
-            && next_sibling_is_compound(parent)
-        {
-            return;
+        if parent.kind() == "expression_statement" {
+            if let Some(gp) = parent.parent() {
+                if gp.kind() == "translation_unit" {
+                    let mut cur = gp.walk();
+                    let kids: Vec<Node> = gp.children(&mut cur).collect();
+                    if let Some(idx) = kids.iter().position(|n| n.id() == parent.id()) {
+                        if followed_by_compound_after_decls(&kids, idx) {
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
     push(
@@ -1321,18 +1329,6 @@ fn check_recursive_main(
         "`main` is called from within a function — recursion through main is an IOCCC pattern"
             .to_string(),
     );
-}
-
-fn next_sibling_is_compound(node: Node) -> bool {
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    let mut cursor = parent.walk();
-    let kids: Vec<Node> = parent.children(&mut cursor).collect();
-    let Some(idx) = kids.iter().position(|n| n.id() == node.id()) else {
-        return false;
-    };
-    kids.get(idx + 1).map(|n| n.kind()) == Some("compound_statement")
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,6 +1428,86 @@ fn advance_whitespace(body: &[u8], i: usize) -> usize {
         i + 2
     } else {
         i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Macro keyword override (`#define <keyword> <body>`)
+// ---------------------------------------------------------------------------
+//
+// Rebinding a C reserved keyword silently changes the meaning of every later
+// occurrence in the file. Empty-body shims (`#define inline`) are excluded —
+// those are a legitimate portability pattern. C11+ pseudo-keywords
+// (`_Static_assert`, `_Generic`, `_Atomic`, etc.) are also excluded because
+// real codebases routinely polyfill them.
+
+const C_KEYWORDS: &[&str] = &[
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+    "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+    "union", "unsigned", "void", "volatile", "while",
+];
+
+fn check_macro_keyword_overrides(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut cursor = root.walk();
+    for top in root.children(&mut cursor) {
+        if top.kind() != "preproc_def" {
+            continue;
+        }
+        let Some(name) = first_node_text_of_kind(top, bytes, "identifier") else {
+            continue;
+        };
+        let body = preproc_arg_child(top)
+            .map(|arg| {
+                std::str::from_utf8(&bytes[arg.start_byte()..arg.end_byte()])
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        if body.is_empty() {
+            // Exclude empty-body shims (`#define inline`).
+            continue;
+        }
+        if C_KEYWORDS.contains(&name) {
+            // `#define for while` — rebinds the keyword itself.
+            push(
+                findings,
+                top,
+                bytes,
+                path,
+                index,
+                SignalKind::MacroKeywordOverride,
+                Severity::Warn,
+                0.90,
+                format!(
+                    "`#define {} {}` rebinds a C reserved keyword — every later occurrence silently changes meaning",
+                    name, body
+                ),
+            );
+        } else if C_KEYWORDS.contains(&body.as_str()) {
+            // `#define QO0 for` — hides a keyword behind an obfuscated alias.
+            push(
+                findings,
+                top,
+                bytes,
+                path,
+                index,
+                SignalKind::MacroKeywordOverride,
+                Severity::Warn,
+                0.85,
+                format!(
+                    "`#define {} {}` aliases a C reserved keyword behind a non-keyword macro name",
+                    name, body
+                ),
+            );
+        }
     }
 }
 
