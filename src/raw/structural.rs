@@ -13,6 +13,7 @@ pub fn analyze(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
     findings.extend(scan_long_lines(path, bytes, index));
     findings.extend(scan_indent_whitespace(path, bytes, index));
     findings.extend(scan_mixed_indent(path, bytes, index));
+    findings.extend(scan_narrow_charset(path, bytes));
     findings
 }
 
@@ -175,6 +176,64 @@ fn scan_mixed_indent(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
     Vec::new()
 }
 
+// ---------------------------------------------------------------------------
+// Narrow character-set file
+// ---------------------------------------------------------------------------
+//
+// JSFuck and similar esoteric-JS encodings use only 6 characters: `[]()!+`.
+// No legitimate source file (even minified) comes close to that restriction —
+// normal minified JS uses 30+ distinct printable characters. When the entire
+// printable-non-whitespace vocabulary of a file fits within a tiny set we have
+// a strong indicator of deliberate character-set-constrained obfuscation.
+
+/// Maximum distinct printable ASCII (0x21..=0x7e) characters for the signal
+/// to fire. JSFuck uses 6; a threshold of 12 gives comfortable headroom for
+/// minor variants while staying far below any legitimate code.
+const NARROW_CHARSET_MAX_DISTINCT: usize = 12;
+
+/// Minimum printable non-whitespace bytes before checking. Prevents false
+/// positives on stub files or files that are almost entirely comments.
+const NARROW_CHARSET_MIN_CONTENT: usize = 200;
+
+fn scan_narrow_charset(path: &Path, bytes: &[u8]) -> Vec<Finding> {
+    let mut present = [false; 128];
+    let mut content = 0usize;
+    for &b in bytes {
+        if (0x21..=0x7e).contains(&b) {
+            present[b as usize] = true;
+            content += 1;
+        }
+    }
+    if content < NARROW_CHARSET_MIN_CONTENT {
+        return Vec::new();
+    }
+    let distinct = present[0x21..=0x7e].iter().filter(|&&p| p).count();
+    if distinct > NARROW_CHARSET_MAX_DISTINCT {
+        return Vec::new();
+    }
+    let chars: String = (0x21u8..=0x7eu8)
+        .filter(|&b| present[b as usize])
+        .map(|b| b as char)
+        .collect();
+    let snippet = redact_snippet(&snippet_around(bytes, 0, 80));
+    vec![Finding {
+        path: path.to_path_buf(),
+        byte_offset: 0,
+        line: 1,
+        col: 1,
+        pass: PassKind::Raw,
+        kind: SignalKind::NarrowFileCharset,
+        severity: Severity::Warn,
+        confidence: 0.90,
+        message: format!(
+            "file uses only {} distinct printable characters ({:?}) — JSFuck-style or character-constrained obfuscation",
+            distinct, chars
+        ),
+        snippet,
+        diff_introduced: false,
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +282,47 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.kind == SignalKind::WhitespaceAnomaly && f.severity == Severity::Info));
+    }
+
+    #[test]
+    fn flags_jsfuck_style_narrow_charset() {
+        // 6-character JSFuck alphabet repeated to exceed the content threshold.
+        let src = b"[]()+!\n".repeat(40);
+        let findings = run(&src);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::NarrowFileCharset),
+            "JSFuck-alphabet file should fire NarrowFileCharset: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn does_not_flag_normal_js() {
+        // A normal JS snippet has far more than 12 distinct chars.
+        let src = b"const x = require('path').join(__dirname, 'dist');\nmodule.exports = x;\n";
+        let findings = run(src);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::NarrowFileCharset),
+            "normal JS must not fire NarrowFileCharset: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn does_not_flag_short_file_below_content_threshold() {
+        // Under 200 printable bytes — not enough content to judge.
+        let src = b"[]()+!\n".repeat(5);
+        let findings = run(&src);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::NarrowFileCharset),
+            "short file must not fire NarrowFileCharset: {:?}",
+            findings
+        );
     }
 }

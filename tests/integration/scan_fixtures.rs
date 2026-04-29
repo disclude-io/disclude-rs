@@ -88,7 +88,7 @@ fn clean_fixture_emits_no_findings() {
 fn total_files_scanned_matches_fixture_count() {
     let r = run();
     assert!(
-        r.files_scanned >= 22,
+        r.files_scanned >= 23,
         "expected at least 21 fixture files, got {} — files: {:?}",
         r.files_scanned,
         r.files.iter().map(|fa| &fa.path).collect::<Vec<_>>()
@@ -917,5 +917,28 @@ fn ts_recruiter_attack_fixture_emits_base64_and_atob() {
             .any(|f| f.kind == SignalKind::DynamicExecution),
         "expected DynamicExecution from atob() call: {:?}",
         file.findings
+    );
+}
+
+#[test]
+fn ts_jsfuck_fixture_emits_narrow_file_charset() {
+    // JSFuck encodes arbitrary JS using only 6 characters: `!()+[]`.
+    // The narrow-file-charset signal must fire at Warn.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("typescript/jsfuck.js"))
+        .expect("typescript/jsfuck.js fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::NarrowFileCharset)
+        .expect("expected NarrowFileCharset finding");
+    assert_eq!(hit.severity, disclude::finding::Severity::Warn);
+    assert!(
+        hit.message.contains('6'),
+        "message should report 6 distinct characters, got: {}",
+        hit.message
     );
 }

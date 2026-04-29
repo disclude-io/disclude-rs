@@ -161,6 +161,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::HighComplexity,
     SignalKind::LongLine,
     SignalKind::WhitespaceAnomaly,
+    SignalKind::NarrowFileCharset,
     SignalKind::IdentifierNarrowCharset,
     SignalKind::IdentifierLowLength,
     SignalKind::IdentifierConfusableCollision,
@@ -200,6 +201,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::HighComplexity => "HighComplexity",
         SignalKind::LongLine => "LongLine",
         SignalKind::WhitespaceAnomaly => "WhitespaceAnomaly",
+        SignalKind::NarrowFileCharset => "NarrowFileCharset",
         SignalKind::IdentifierNarrowCharset => "IdentifierNarrowCharset",
         SignalKind::IdentifierLowLength => "IdentifierLowLength",
         SignalKind::IdentifierConfusableCollision => "IdentifierConfusableCollision",
@@ -246,6 +248,7 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::HighComplexity => "String literal with high entropy (high compression ratio)",
         SignalKind::LongLine => "Line length in a non-minified file exceeds threshold",
         SignalKind::WhitespaceAnomaly => "Unusual whitespace in indentation",
+        SignalKind::NarrowFileCharset => "File uses a very small printable character vocabulary",
         SignalKind::IdentifierNarrowCharset => {
             "Identifier uses only visually confusable characters"
         }

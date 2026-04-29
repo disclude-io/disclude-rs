@@ -29,6 +29,7 @@ pub enum SignalKind {
     HighComplexity,
     LongLine,
     WhitespaceAnomaly,
+    NarrowFileCharset,
     // token
     IdentifierNarrowCharset,
     IdentifierLowLength,
@@ -71,6 +72,7 @@ impl SignalKind {
             SignalKind::HighComplexity => "high-complexity",
             SignalKind::LongLine => "long-line",
             SignalKind::WhitespaceAnomaly => "whitespace-anomaly",
+            SignalKind::NarrowFileCharset => "narrow-file-charset",
             SignalKind::IdentifierNarrowCharset => "identifier-narrow-charset",
             SignalKind::IdentifierLowLength => "identifier-low-length",
             SignalKind::IdentifierConfusableCollision => "identifier-confusable-collision",

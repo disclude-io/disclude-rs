@@ -112,6 +112,7 @@ These run on every file regardless of language.
 | `high-complexity` | warn | String literal with unusually high Shannon entropy (high compression ratio). Raw high-entropy data in source is often an encoded payload or embedded binary. |
 | `long-line` | info | Line length exceeds threshold in a file that is not a minified bundle. Lines dominated (>80%) by string/comment content are suppressed — the signal targets long *code* lines, which are a common obfuscation tactic. |
 | `whitespace-anomaly` | warn | Unusual whitespace in indentation (e.g. mixed tabs/spaces, non-standard whitespace characters), or — for C — decorative internal whitespace layout where ≥ 30 % of lines have ≥ 2 runs of ≥ 4 spaces between code tokens. The decorative trigger catches IOCCC-style code that has been padded into rectangles, diamonds, or other visual shapes. Two structural-alignment filters suppress switch/case tables (one starting keyword dominates) and column-aligned data arrays (run-start columns cluster at a few fixed positions). |
+| `narrow-file-charset` | warn | The file's entire printable non-whitespace character vocabulary fits within ≤ 12 distinct ASCII characters (minimum 200 bytes of content). [JSFuck](https://github.com/aemkei/jsfuck) uses exactly 6 characters (`!()+[]`) to encode arbitrary JavaScript using type coercion — the resulting file has no readable identifiers, strings, or keywords. The message names the characters found. |
 
 ### Identifier anomalies
 
