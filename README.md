@@ -29,6 +29,7 @@ disclude scan <path> [options]
 | `--no-token` | — | Skip token-level analysis |
 | `--no-ast` | — | Skip AST analysis (faster, less precise) |
 
+
 ### Examples
 
 ```sh
@@ -44,6 +45,15 @@ disclude scan ./my-package --severity critical --exit-code
 # Review only what a PR introduced
 disclude scan ./my-package --diff main --exit-code
 ```
+
+## Output formats
+
+**`human`**: coloured terminal output grouped by file.
+
+**`json`**: newline-delimited JSON, one object per file. Suitable for further processing.
+
+**`sarif`**: [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), compatible with GitHub Code Scanning, VS Code SARIF viewer, and most CI platforms. Every signal kind appears in the rules catalog even if no findings were produced.
+
 
 ## Languages
 
@@ -209,10 +219,10 @@ AST pass; language-specific.
 | `proc-macro-presence` | info | Rust crate defines a procedural macro (`proc-macro = true`). Proc-macros run arbitrary code at compile time with full access to the compiler. Informational — legitimate proc-macros are common, but they warrant extra scrutiny in untrusted dependencies. |
 | `install-hook-shellout` | warn | `package.json` `preinstall`/`postinstall`/`install` script shells out to a non-trivial command. Runs automatically on `npm install`. |
 
-## Output formats
 
-**`human`** — coloured terminal output grouped by file.
+## What is New
 
-**`json`** — newline-delimited JSON, one object per file. Suitable for further processing.
+### 1.0.0
 
-**`sarif`** — [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), compatible with GitHub Code Scanning, VS Code SARIF viewer, and most CI platforms. Every signal kind appears in the rules catalog even if no findings were produced.
+Initial release.
+

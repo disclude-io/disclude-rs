@@ -1,10 +1,12 @@
 [package]
 name = "disclude"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "Detect obfuscation in source code packages"
 license = "MIT"
 repository = "https://github.com/disclude-io/disclude-rs"
+readme = "README.md"
+keywords = ["cybersecurity"]
+description = "Detect obfuscation in source code"
 
 [lib]
 name = "disclude"
