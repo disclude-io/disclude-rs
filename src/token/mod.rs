@@ -800,8 +800,8 @@ fn mask_c_comments(text: &[u8]) -> Vec<u8> {
                 j += 1;
             }
             let end = (j + 2).min(n);
-            for k in i..end {
-                out[k] = b' ';
+            for slot in &mut out[i..end] {
+                *slot = b' ';
             }
             i = end;
             continue;
@@ -811,8 +811,8 @@ fn mask_c_comments(text: &[u8]) -> Vec<u8> {
             while j < n && out[j] != b'\n' {
                 j += 1;
             }
-            for k in i..j {
-                out[k] = b' ';
+            for slot in &mut out[i..j] {
+                *slot = b' ';
             }
             i = j;
             continue;
