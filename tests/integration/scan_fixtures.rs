@@ -88,8 +88,8 @@ fn clean_fixture_emits_no_findings() {
 fn total_files_scanned_matches_fixture_count() {
     let r = run();
     assert!(
-        r.files_scanned >= 23,
-        "expected at least 21 fixture files, got {} — files: {:?}",
+        r.files_scanned >= 26,
+        "expected at least 26 fixture files, got {} — files: {:?}",
         r.files_scanned,
         r.files.iter().map(|fa| &fa.path).collect::<Vec<_>>()
     );
@@ -940,5 +940,60 @@ fn ts_jsfuck_fixture_emits_narrow_file_charset() {
         hit.message.contains('6'),
         "message should report 6 distinct characters, got: {}",
         hit.message
+    );
+}
+
+#[test]
+fn bash_eval_dynamic_fixture_emits_dynamic_execution_critical() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/eval_dynamic.sh"))
+        .expect("bash/eval_dynamic.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == disclude::finding::Severity::Critical)
+        .expect("expected CRITICAL DynamicExecution finding on bash/eval_dynamic.sh");
+    assert!(
+        hit.message.contains("eval"),
+        "expected message to cite `eval`, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_pipe_to_shell_fixture_emits_dynamic_execution_warn() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/pipe_to_shell.sh"))
+        .expect("bash/pipe_to_shell.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == disclude::finding::Severity::Warn)
+        .expect("expected Warn DynamicExecution finding on bash/pipe_to_shell.sh");
+    assert!(
+        hit.message.contains("bash"),
+        "expected message to cite `bash`, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_clean_fixture_emits_no_findings() {
+    let r = run();
+    let clean = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/clean.sh"))
+        .expect("bash/clean.sh fixture was scanned");
+    assert!(
+        clean.findings.is_empty(),
+        "bash clean fixture produced findings: {:?}",
+        clean.findings
     );
 }

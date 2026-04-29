@@ -87,6 +87,7 @@ pub fn analyze(
 
 fn tokenize(bytes: &[u8], lang: Language) -> Vec<Token> {
     match lang {
+        Language::Bash => python::tokenize(bytes), // shell uses '#' comments like Python
         Language::C => c::tokenize(bytes),
         Language::Python => python::tokenize(bytes),
         Language::Rust => rust::tokenize(bytes),
@@ -249,6 +250,7 @@ fn is_conventional_short(ident: &str, lang: Language) -> bool {
         return true;
     }
     match lang {
+        Language::Bash => false,
         Language::C => false,
         Language::Python => ident.starts_with("__") && ident.ends_with("__"),
         Language::Rust => ident.starts_with('_'),

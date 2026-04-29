@@ -4,6 +4,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
+    Bash,
     C,
     Python,
     Rust,
@@ -15,6 +16,7 @@ impl Language {
     pub fn from_extension(path: &Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?;
         match ext {
+            "sh" | "bash" | "bsh" | "ksh" | "zsh" => Some(Language::Bash),
             "c" | "h" => Some(Language::C),
             "py" | "pyi" => Some(Language::Python),
             "rs" => Some(Language::Rust),
@@ -37,6 +39,12 @@ impl Language {
             Some(Language::Python)
         } else if line.contains("node") || line.contains("deno") || line.contains("bun") {
             Some(Language::JavaScript)
+        } else if line.contains("bash")
+            || line.contains("/sh")
+            || line.contains("ksh")
+            || line.contains("zsh")
+        {
+            Some(Language::Bash)
         } else {
             None
         }
@@ -48,6 +56,7 @@ impl Language {
 
     pub fn parse_flag(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
+            "bash" | "sh" | "shell" => Some(Language::Bash),
             "c" => Some(Language::C),
             "python" | "py" => Some(Language::Python),
             "rust" | "rs" => Some(Language::Rust),
@@ -59,6 +68,7 @@ impl Language {
 
     pub fn as_str(&self) -> &'static str {
         match self {
+            Language::Bash => "bash",
             Language::C => "c",
             Language::Python => "python",
             Language::Rust => "rust",
