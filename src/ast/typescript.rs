@@ -198,7 +198,7 @@ fn check_call(
                 }
             }
             "btoa" => {
-                if positional.first().is_some() {
+                if !positional.is_empty() {
                     push(
                         findings,
                         node,
