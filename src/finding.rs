@@ -32,6 +32,7 @@ pub enum SignalKind {
     IdentifierNarrowCharset,
     IdentifierLowLength,
     StringConcatConstruction,
+    MacroAlias,
     // ast
     DynamicExecution,
     DynamicImport,
@@ -60,6 +61,7 @@ impl SignalKind {
             SignalKind::IdentifierNarrowCharset => "identifier-narrow-charset",
             SignalKind::IdentifierLowLength => "identifier-low-length",
             SignalKind::StringConcatConstruction => "string-concat-construction",
+            SignalKind::MacroAlias => "macro-alias",
             SignalKind::DynamicExecution => "dynamic-execution",
             SignalKind::DynamicImport => "dynamic-import",
             SignalKind::DynamicAttribute => "dynamic-attribute",

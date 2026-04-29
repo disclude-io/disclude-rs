@@ -163,6 +163,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::IdentifierNarrowCharset,
     SignalKind::IdentifierLowLength,
     SignalKind::StringConcatConstruction,
+    SignalKind::MacroAlias,
     SignalKind::DynamicExecution,
     SignalKind::DynamicImport,
     SignalKind::DynamicAttribute,
@@ -189,6 +190,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::IdentifierNarrowCharset => "IdentifierNarrowCharset",
         SignalKind::IdentifierLowLength => "IdentifierLowLength",
         SignalKind::StringConcatConstruction => "StringConcatConstruction",
+        SignalKind::MacroAlias => "MacroAlias",
         SignalKind::DynamicExecution => "DynamicExecution",
         SignalKind::DynamicImport => "DynamicImport",
         SignalKind::DynamicAttribute => "DynamicAttribute",
@@ -225,6 +227,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::IdentifierLowLength => "File-wide mean identifier length is unusually short",
         SignalKind::StringConcatConstruction => {
             "String concatenation reconstructs a sensitive identifier"
+        }
+        SignalKind::MacroAlias => {
+            "Short C macro name aliases a sensitive function or syscall"
         }
         SignalKind::DynamicExecution => "exec/eval/Function/setTimeout invoked on a non-literal",
         SignalKind::DynamicImport => "Import or require with a constructed specifier",

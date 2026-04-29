@@ -63,6 +63,7 @@ pub fn analyze(
     findings.extend(emit_surrogate_escape_findings(
         path, bytes, index, lang, &tokens,
     ));
+    findings.extend(emit_macro_alias_findings(path, bytes, index, lang, &tokens));
     findings
 }
 
@@ -588,6 +589,122 @@ fn emit_surrogate_escape_findings(
     findings
 }
 
+// ---------------------------------------------------------------------------
+// C macro aliasing — `#define <short> <sensitive>`
+// ---------------------------------------------------------------------------
+//
+// Obfuscated C frequently aliases system calls or libc functions to one- or
+// two-character macro names (`#define A write`) so static greps for
+// `system(`, `exec(`, etc. miss the call site. The C tokenizer emits each
+// preprocessor directive as a single Comment token whose content starts at
+// the byte after `#`, so we just scan those.
+
+const MACRO_SENSITIVE_NAMES: &[&str] = &[
+    // process spawn / replacement
+    "system", "popen", "execl", "execlp", "execle", "execv", "execvp", "execve",
+    "fork", "vfork", "kill", "raise",
+    // dynamic loading
+    "dlopen", "dlsym", "dlmopen", "dlclose",
+    // direct syscalls (bonsai uses `#define A write`)
+    "write", "read", "open", "openat", "close",
+    // memory protection
+    "mmap", "mprotect", "munmap",
+    // network
+    "socket", "connect", "bind", "accept", "listen",
+    "send", "sendto", "sendmsg", "recv", "recvfrom", "recvmsg",
+    // generic but useful when aliased to a 1-char name
+    "ptrace", "syscall",
+];
+
+const MACRO_NAME_MAX_LEN: usize = 2;
+
+fn emit_macro_alias_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::C) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    for tok in tokens.iter().filter(|t| t.kind == TokenKind::Comment) {
+        let Ok(content) = std::str::from_utf8(&bytes[tok.content_start..tok.content_end]) else {
+            continue;
+        };
+        let Some((name, replacement)) = parse_define(content) else {
+            continue;
+        };
+        if name.len() > MACRO_NAME_MAX_LEN {
+            continue;
+        }
+        if !MACRO_SENSITIVE_NAMES.contains(&replacement) {
+            continue;
+        }
+        let (line, col) = index.locate(tok.start);
+        findings.push(Finding {
+            path: path.to_path_buf(),
+            byte_offset: tok.start,
+            line,
+            col,
+            pass: PassKind::Token,
+            kind: SignalKind::MacroAlias,
+            severity: Severity::Warn,
+            confidence: 0.65,
+            message: format!(
+                "{}-char macro `{}` aliases sensitive name `{}`",
+                name.len(),
+                name,
+                replacement
+            ),
+            snippet: crate::finding::redact_snippet(&snippet_around(bytes, tok.start, 80)),
+            diff_introduced: false,
+        });
+    }
+    findings
+}
+
+/// Given a preprocessor directive body (the bytes after `#`), return
+/// `(macro_name, replacement_identifier)` if the directive is a simple
+/// object-like `#define NAME REPLACEMENT` where REPLACEMENT is a single
+/// identifier. Function-like macros (`NAME(args)`) and multi-token bodies
+/// return `None` so the caller can skip them.
+fn parse_define(content: &str) -> Option<(&str, &str)> {
+    let body = content.trim_start();
+    let body = body.strip_prefix("define")?;
+    // Require whitespace after `define` so we don't match `defined(X)`.
+    if !body.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    let mut parts = body.split_whitespace();
+    let name = parts.next()?;
+    if !is_simple_identifier(name) {
+        // Function-like macros (`NAME(x)`) and anything containing punctuation.
+        return None;
+    }
+    let replacement = parts.next()?;
+    if parts.next().is_some() {
+        // Multi-token replacement is not a simple alias.
+        return None;
+    }
+    if !is_simple_identifier(replacement) {
+        return None;
+    }
+    Some((name, replacement))
+}
+
+fn is_simple_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,6 +903,86 @@ mod tests {
             "no IdentifierLowLength expected, got: {:?}",
             findings
         );
+    }
+
+    // --- macro alias detection ---
+
+    fn run_macro_alias(src: &[u8], lang: Language) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, lang);
+        emit_macro_alias_findings(&PathBuf::from("test.c"), src, &idx, lang, &tokens)
+    }
+
+    #[test]
+    fn one_char_macro_aliasing_write_is_warn() {
+        let src = b"#define A write\nint main(){return 0;}\n";
+        let findings = run_macro_alias(src, Language::C);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::MacroAlias)
+            .expect("expected MacroAlias for `#define A write`");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("`A`"));
+        assert!(hit.message.contains("`write`"));
+    }
+
+    #[test]
+    fn two_char_macro_aliasing_system_is_warn() {
+        let src = b"#define SY system\n";
+        let findings = run_macro_alias(src, Language::C);
+        assert!(findings.iter().any(|f| f.kind == SignalKind::MacroAlias));
+    }
+
+    #[test]
+    fn long_macro_name_does_not_fire() {
+        let src = b"#define WRAPPER write\n";
+        let findings = run_macro_alias(src, Language::C);
+        assert!(findings.iter().all(|f| f.kind != SignalKind::MacroAlias));
+    }
+
+    #[test]
+    fn non_sensitive_replacement_does_not_fire() {
+        let src = b"#define N 100\n#define X y\n";
+        let findings = run_macro_alias(src, Language::C);
+        assert!(findings.iter().all(|f| f.kind != SignalKind::MacroAlias));
+    }
+
+    #[test]
+    fn function_like_macro_does_not_fire() {
+        // `#define A(x)` looks like an alias of `(x)`, but it's a function-like
+        // macro — name has a `(` immediately after, so we skip it.
+        let src = b"#define A(x) write(1, x, 1)\n";
+        let findings = run_macro_alias(src, Language::C);
+        assert!(findings.iter().all(|f| f.kind != SignalKind::MacroAlias));
+    }
+
+    #[test]
+    fn multi_token_replacement_does_not_fire() {
+        let src = b"#define A write_once\n#define B (write)\n";
+        let findings = run_macro_alias(src, Language::C);
+        assert!(findings.iter().all(|f| f.kind != SignalKind::MacroAlias));
+    }
+
+    #[test]
+    fn macro_alias_skipped_for_non_c_languages() {
+        let src = b"#define A write\n";
+        for lang in [Language::Python, Language::Rust, Language::JavaScript] {
+            let findings = run_macro_alias(src, lang);
+            assert!(
+                findings.iter().all(|f| f.kind != SignalKind::MacroAlias),
+                "MacroAlias should only fire for C, fired for {:?}",
+                lang
+            );
+        }
+    }
+
+    #[test]
+    fn defined_pseudo_function_is_not_an_alias() {
+        // `#if defined(write)` — the `defined` keyword should not be parsed as
+        // `define` by parse_define.
+        let src = b"#if defined(write)\n#endif\n";
+        let findings = run_macro_alias(src, Language::C);
+        assert!(findings.iter().all(|f| f.kind != SignalKind::MacroAlias));
     }
 
     #[test]

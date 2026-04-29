@@ -331,6 +331,29 @@ fn c_bonsai_fixture_emits_numeric_literal_payload() {
 }
 
 #[test]
+fn c_bonsai_fixture_emits_macro_alias_for_write() {
+    // bonsai.c starts with `#define A write` — a 1-char macro aliasing the
+    // write(2) syscall. The token pass should fire MacroAlias WARN.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/bonsai.c"))
+        .expect("c/bonsai.c fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::MacroAlias)
+        .expect("expected MacroAlias finding");
+    assert_eq!(hit.severity, disclude::finding::Severity::Warn);
+    assert!(
+        hit.message.contains("`A`") && hit.message.contains("`write`"),
+        "expected message to cite the alias and target, got: {}",
+        hit.message
+    );
+}
+
+#[test]
 fn c_bonsai_fixture_emits_identifier_low_length() {
     // bonsai.c is IOCCC-style: many single-letter globals/functions
     // (`A`, `O`, `w`, `r`, `L`, `P`, `S`, `Q`, …) but with system-call
