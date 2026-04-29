@@ -62,6 +62,7 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
             }
         })
         .collect();
+    analyses.sort_by(|a, b| a.path.cmp(&b.path));
 
     if let Some(git_ref) = opts.diff_ref.as_deref() {
         match diff::compute_added_lines(root, git_ref) {
