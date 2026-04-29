@@ -1003,3 +1003,65 @@ fn bash_clean_fixture_emits_no_findings() {
         clean.findings
     );
 }
+
+#[test]
+fn bash_b64_dropper_fixture_emits_base64_and_pipe_to_shell() {
+    // Synthetic dropper based on the Linux malware pattern described in
+    // "Analysis of a Malicious Linux Script" (Medium, Shubh Andrew):
+    // a base64-encoded second-stage script is embedded in the file, decoded
+    // at runtime, and piped directly into bash — no disk write.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/b64_dropper.sh"))
+        .expect("bash/b64_dropper.sh fixture was scanned");
+
+    // Raw pass: the embedded base64 literal should be flagged.
+    file.findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncodingBase64)
+        .expect("expected EncodingBase64 finding on bash/b64_dropper.sh");
+
+    // AST pass: the pipeline ending in `bash` should be flagged.
+    let pipe_hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Warn
+        })
+        .expect("expected Warn DynamicExecution (pipe-to-shell) on bash/b64_dropper.sh");
+    assert!(
+        pipe_hit.message.contains("bash"),
+        "expected pipe message to cite `bash`, got: {}",
+        pipe_hit.message
+    );
+}
+
+#[test]
+fn bash_wget_exec_fixture_emits_dynamic_exec_critical() {
+    // Synthetic dropper based on the Linux malware pattern: fetches a binary
+    // disguised as a PNG image, stages it in a hidden /var/tmp directory,
+    // and replaces the current process via exec with a dynamic path.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/wget_exec.sh"))
+        .expect("bash/wget_exec.sh fixture was scanned");
+
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution on bash/wget_exec.sh");
+    assert!(
+        hit.message.contains("exec"),
+        "expected message to cite `exec`, got: {}",
+        hit.message
+    );
+}
