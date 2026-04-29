@@ -193,20 +193,19 @@ fn check_call(
                     );
                 }
             }
-            "btoa" => {
-                if !positional.is_empty() {
-                    push(
-                        findings,
-                        node,
-                        bytes,
-                        path,
-                        index,
-                        SignalKind::DynamicExecution,
-                        Severity::Info,
-                        0.55,
-                        "`btoa` encodes a value as base64 at runtime — used in exfiltration patterns".to_string(),
-                    );
-                }
+            "btoa" if !positional.is_empty() => {
+                push(
+                    findings,
+                    node,
+                    bytes,
+                    path,
+                    index,
+                    SignalKind::DynamicExecution,
+                    Severity::Info,
+                    0.55,
+                    "`btoa` encodes a value as base64 at runtime — used in exfiltration patterns"
+                        .to_string(),
+                );
             }
             "setTimeout" | "setInterval" => {
                 if let Some(first) = positional.first() {
