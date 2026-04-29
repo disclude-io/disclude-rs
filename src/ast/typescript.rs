@@ -172,6 +172,46 @@ fn check_call(
                     }
                 }
             }
+            // `atob(x)` decodes base64 at runtime — the first step in the
+            // classic "store payload as base64, decode and request/exec at
+            // runtime" DPRK supply-chain pattern. Any call is suspicious since
+            // legitimate uses are rare in library or server code. `btoa(x)`
+            // encodes; less immediately dangerous but used for exfiltration.
+            "atob" => {
+                if let Some(first) = positional.first() {
+                    let msg = if is_literal_expression(*first) {
+                        "`atob` decodes a base64 literal — value is hidden in source".to_string()
+                    } else {
+                        "`atob` decodes a base64 value at runtime — common step before dynamic fetch or eval".to_string()
+                    };
+                    push(
+                        findings,
+                        node,
+                        bytes,
+                        path,
+                        index,
+                        SignalKind::DynamicExecution,
+                        Severity::Warn,
+                        0.75,
+                        msg,
+                    );
+                }
+            }
+            "btoa" => {
+                if positional.first().is_some() {
+                    push(
+                        findings,
+                        node,
+                        bytes,
+                        path,
+                        index,
+                        SignalKind::DynamicExecution,
+                        Severity::Info,
+                        0.55,
+                        "`btoa` encodes a value as base64 at runtime — used in exfiltration patterns".to_string(),
+                    );
+                }
+            }
             "setTimeout" | "setInterval" => {
                 if let Some(first) = positional.first() {
                     if is_string_literal(*first) {

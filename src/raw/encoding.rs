@@ -60,11 +60,14 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
         }
         let end = i;
         let len = end - start;
-        // Minimum length 64: below this we hit mostly hashes, session IDs,
-        // wheel-RECORD sha256 tags, cache keys. A real obfuscated-code
-        // payload is hundreds of bytes. Anything entropic that slips
-        // through here is still caught by the HighComplexity pass.
-        if len < 64 {
+        // Minimum length: 64 for unpadded blobs (avoids git SHAs, session
+        // IDs, cache keys); 40 for blobs ending with `=` or `==` padding.
+        // Base64 padding is definitive proof the blob is encoded data, so we
+        // can safely lower the threshold — the dominant false-positive class
+        // (hex digests, identifiers) never carries padding.
+        let is_padded = bytes.get(end.saturating_sub(1)) == Some(&b'=');
+        let min_len = if is_padded { 40 } else { 64 };
+        if len < min_len {
             continue;
         }
 

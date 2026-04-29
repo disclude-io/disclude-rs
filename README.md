@@ -98,7 +98,7 @@ These run on every file regardless of language.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `encoding-base64` | warn | Base64-shaped blob in a string literal (≥64 chars matching the base64 alphabet). Often used to embed payloads that are decoded and executed at runtime. Demoted to `info` outside string literals. |
+| `encoding-base64` | warn | Base64-shaped blob in a string literal. Threshold: ≥64 chars for unpadded blobs; ≥40 chars when the blob ends with `=` or `==` padding (padding is definitive proof of base64 encoding, ruling out hex digests and identifiers). Often used to embed payloads or C2 URLs that are decoded and requested at runtime. Demoted to `info` outside string literals. |
 | `encoding-hex` | warn | Long run of `\xNN` hex escape sequences in a string literal. A common way to embed shellcode or obfuscated text. Demoted to `info` outside string literals. |
 | `encoding-octal` | warn | Long run of `\NNN` octal escape sequences (≥6 consecutive, minimum entropy 2.5 bits/byte). Octal is less recognizable than hex and valid in C, Python, and JavaScript — used to encode arbitrary bytes or hide printable characters (`\101` for `A`, `\012` for newline). Demoted to `info` outside string literals. |
 | `encoding-escape-soup` | warn | Dense mix of arbitrary escape sequences. Indicates content that has been serialized or obfuscated to avoid plain-text grep. |
@@ -139,7 +139,7 @@ AST pass; tree-sitter.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `dynamic-execution` | critical / warn | `eval()`, `new Function()`, or `setTimeout`/`setInterval` called with a string argument. |
+| `dynamic-execution` | critical / warn / info | `eval()`, `new Function()`, or `setTimeout`/`setInterval` called with a string argument (critical/warn). `atob(x)` — base64 decode at runtime (warn); the first step of the classic supply-chain pattern: store C2 URL or payload as a base64 literal, decode it, then fetch or exec. `btoa(x)` — base64 encode at runtime (info); used in exfiltration patterns. |
 | `dynamic-import` | warn | `require(expr)` where `expr` is not a string literal, or `` import(`...${expr}...`) `` template. |
 | `dynamic-attribute` | warn | `process.binding(name)` — Node.js internal binding escape hatch, reaches C++ internals not exposed through the public API. |
 

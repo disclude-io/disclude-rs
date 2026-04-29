@@ -88,7 +88,7 @@ fn clean_fixture_emits_no_findings() {
 fn total_files_scanned_matches_fixture_count() {
     let r = run();
     assert!(
-        r.files_scanned >= 21,
+        r.files_scanned >= 22,
         "expected at least 21 fixture files, got {} — files: {:?}",
         r.files_scanned,
         r.files.iter().map(|fa| &fa.path).collect::<Vec<_>>()
@@ -885,5 +885,29 @@ fn c_clean_fixture_emits_no_findings() {
         clean.findings.is_empty(),
         "c clean fixture produced findings: {:?}",
         clean.findings
+    );
+}
+
+#[test]
+fn ts_recruiter_attack_fixture_emits_base64_and_atob() {
+    // Replicates the DPRK-linked supply-chain attack described at
+    // https://dev.to/mighty840/i-was-targeted-by-a-dprk-linked-supply-chain-attack-via-linkedin-heres-exactly-how-it-worked-21kp
+    // The attack stores a C2 URL as a padded base64 literal then decodes it
+    // with `atob()` at runtime. Both signals must fire.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("typescript/recruiter_attack.js"))
+        .expect("typescript/recruiter_attack.js fixture was scanned");
+    assert!(
+        file.findings.iter().any(|f| f.kind == SignalKind::EncodingBase64),
+        "expected EncodingBase64 from padded base64 C2 URL: {:?}",
+        file.findings
+    );
+    assert!(
+        file.findings.iter().any(|f| f.kind == SignalKind::DynamicExecution),
+        "expected DynamicExecution from atob() call: {:?}",
+        file.findings
     );
 }
