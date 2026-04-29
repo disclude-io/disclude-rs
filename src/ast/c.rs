@@ -61,6 +61,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     if !arrays.is_empty() {
         check_numeric_payload_casts(root, bytes, path, &index, &mut findings, &arrays);
     }
+    check_legacy_kr_main(root, bytes, path, &index, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -610,6 +611,124 @@ fn is_byte_pointer_type_descriptor(type_desc: Node, bytes: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Pre-ANSI K&R-style `main` declaration (no return type)
+// ---------------------------------------------------------------------------
+//
+// `main(int c, char *C[]) { ... }` without a return type is pre-ANSI C
+// (implicit-int return). Modern C compilers reject this; modern code never
+// writes it. tree-sitter-c surfaces it as a top-level ERROR node followed by
+// a `compound_statement` — the ERROR contains the malformed signature whose
+// first deep `identifier` is `main`.
+
+fn check_legacy_kr_main(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut cursor = root.walk();
+    let children: Vec<Node> = root.children(&mut cursor).collect();
+    for (idx, child) in children.iter().enumerate() {
+        let kind = child.kind();
+        let is_kr = match kind {
+            // Pattern A: simple K&R `main() { ... }` — tree-sitter recovers
+            // as a top-level ERROR (containing the signature) followed by a
+            // `compound_statement`.
+            "ERROR" => {
+                let next = children.get(idx + 1);
+                next.map(|n| n.kind() == "compound_statement")
+                    .unwrap_or(false)
+                    && first_identifier_text(*child, bytes) == Some("main")
+            }
+            // Pattern B: heavy-recovery case (notation.c). The function body
+            // gets folded into a top-level `declaration` whose first child is
+            // `macro_type_specifier` (tree-sitter's recovery for `name(type)`
+            // when no proper return-type precedes the function name).
+            "declaration" => {
+                child
+                    .child(0)
+                    .map(|c| c.kind() == "macro_type_specifier")
+                    .unwrap_or(false)
+                    && first_identifier_text(*child, bytes) == Some("main")
+            }
+            // Pattern C: classic K&R signature with explicit parameter
+            // declarations between the signature and the body, e.g.
+            // `main(argc, argv) int argc; char **argv; { ... }`. Here the
+            // signature parses as an `expression_statement` whose call
+            // expression's callee is `main`, followed by parameter
+            // `declaration`s, followed by a top-level `compound_statement`.
+            "expression_statement" => {
+                expression_statement_calls_main(*child, bytes)
+                    && followed_by_compound_after_decls(&children, idx)
+            }
+            _ => false,
+        };
+        if !is_kr {
+            continue;
+        }
+        let offset = child.start_byte();
+        let (line, col) = index.locate(offset);
+        findings.push(Finding {
+            path: path.to_path_buf(),
+            byte_offset: offset,
+            line,
+            col,
+            pass: PassKind::Ast,
+            kind: SignalKind::LegacyKAndRMain,
+            severity: Severity::Warn,
+            confidence: 0.85,
+            message: "main() defined without a return type (pre-ANSI K&R style)".to_string(),
+            snippet: redact_snippet(&snippet_around(bytes, offset, 80)),
+            diff_introduced: false,
+        });
+        return; // one finding per file
+    }
+}
+
+fn expression_statement_calls_main(node: Node, bytes: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "call_expression" {
+            if let Some(callee) = child.child(0) {
+                if callee.kind() == "identifier"
+                    && std::str::from_utf8(&bytes[callee.start_byte()..callee.end_byte()]).ok()
+                        == Some("main")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn followed_by_compound_after_decls(children: &[Node], idx: usize) -> bool {
+    for sibling in &children[idx + 1..] {
+        match sibling.kind() {
+            "declaration" => continue,
+            "compound_statement" => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// First identifier in a DFS traversal of `node`, or None if there isn't one.
+fn first_identifier_text<'a>(node: Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    if node.kind() == "identifier" {
+        return std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).ok();
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(s) = first_identifier_text(child, bytes) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -873,6 +992,101 @@ void f(){ void *p=(void*)O; }
                 .all(|f| f.kind != SignalKind::NumericLiteralPayload),
             "void* cast should not fire, got: {:?}",
             findings
+        );
+    }
+
+    // --- K&R legacy main detection ---
+
+    #[test]
+    fn kr_main_simple_form_is_warn() {
+        // Pattern A: tree-sitter parses this as ERROR + compound_statement.
+        let src = b"main() { return 0; }\n";
+        let findings = run(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::LegacyKAndRMain)
+            .expect("expected LegacyKAndRMain for `main() { ... }`");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("K&R"));
+    }
+
+    #[test]
+    fn kr_main_with_argv_argc_is_warn() {
+        // Pattern A: ERROR + compound_statement, but with K&R argv/argc.
+        let src = b"main(argc, argv) int argc; char **argv; { return 0; }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::LegacyKAndRMain));
+    }
+
+    #[test]
+    fn kr_main_heavy_recovery_form_fires() {
+        // Pattern B: notation.c-style — function body is heavy enough that
+        // tree-sitter folds the whole thing into a `declaration` with
+        // `macro_type_specifier` as the first child.
+        // Use the actual notation.c head to ensure heavy recovery triggers.
+        let src = br#"#include<stdio.h>
+#define c(C) printf("%c",C)
+#define C(c) ((int*)(C[1]+6))[c]
+main(int c,char *C[]) {
+  int a, b, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z;
+  for (a=0; a<10; a++) { for (b=0; b<10; b++) { d = a + b; } }
+  return 0;
+}
+"#;
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::LegacyKAndRMain),
+            "expected LegacyKAndRMain for heavy-recovery main, got: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn explicit_int_main_does_not_fire() {
+        let src = b"int main(int argc, char **argv) { return 0; }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::LegacyKAndRMain));
+    }
+
+    #[test]
+    fn explicit_void_main_does_not_fire() {
+        let src = b"void main(void) { return; }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::LegacyKAndRMain));
+    }
+
+    #[test]
+    fn function_named_other_than_main_does_not_fire() {
+        // K&R-style function but not `main` — out of scope for this signal.
+        let src = b"foo() { return 0; }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::LegacyKAndRMain));
+    }
+
+    #[test]
+    fn one_finding_per_file_only() {
+        // Even if the file has multiple anomalies that could match, we emit at
+        // most one LegacyKAndRMain finding.
+        let src = b"main() { return 0; }\nmain() { return 1; }\n";
+        let findings = run(src);
+        let hits = findings
+            .iter()
+            .filter(|f| f.kind == SignalKind::LegacyKAndRMain)
+            .count();
+        assert_eq!(
+            hits, 1,
+            "expected one finding, got {} in {:?}",
+            hits, findings
         );
     }
 }

@@ -172,6 +172,8 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::InstallHookShellout,
     SignalKind::NumericLiteralPayload,
     SignalKind::FormatStringWrite,
+    SignalKind::LegacyKAndRMain,
+    SignalKind::LineContinuationInCode,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -200,6 +202,8 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::InstallHookShellout => "InstallHookShellout",
         SignalKind::NumericLiteralPayload => "NumericLiteralPayload",
         SignalKind::FormatStringWrite => "FormatStringWrite",
+        SignalKind::LegacyKAndRMain => "LegacyKAndRMain",
+        SignalKind::LineContinuationInCode => "LineContinuationInCode",
     }
 }
 
@@ -244,6 +248,10 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::FormatStringWrite => {
             "printf format string contains %n write directive (memory write primitive)"
+        }
+        SignalKind::LegacyKAndRMain => "main() defined without a return type (pre-ANSI K&R style)",
+        SignalKind::LineContinuationInCode => {
+            "Backslash line continuation outside preprocessor or string literal"
         }
     }
 }

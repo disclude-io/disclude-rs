@@ -67,6 +67,12 @@ pub fn analyze(
     findings.extend(emit_format_string_write_findings(
         path, bytes, index, lang, &tokens,
     ));
+    findings.extend(emit_decorative_whitespace_findings(
+        path, bytes, index, lang, &tokens,
+    ));
+    findings.extend(emit_line_continuation_findings(
+        path, bytes, index, lang, &tokens,
+    ));
     findings
 }
 
@@ -742,7 +748,16 @@ fn emit_format_string_write_findings(
             }
             _ => continue,
         };
-        for (off, dir) in scan_format_n_directives(text) {
+        // For #define directives, strip embedded C comments — `%n` inside a
+        // `/* ... */` or `// ...` is documentation, not code.
+        let scratch: Vec<u8>;
+        let scan_text: &[u8] = if matches!(tok.kind, TokenKind::Comment) {
+            scratch = mask_c_comments(text);
+            &scratch
+        } else {
+            text
+        };
+        for (off, dir) in scan_format_n_directives(scan_text) {
             let abs = abs_offset + off;
             let (line, col) = index.locate(abs);
             findings.push(Finding {
@@ -769,6 +784,42 @@ fn emit_format_string_write_findings(
         }
     }
     findings
+}
+
+/// Replace `/* ... */` and `// ...` comment regions in `text` with spaces,
+/// preserving byte offsets. Used to avoid matching `%n` inside an embedded
+/// comment of a `#define` line.
+fn mask_c_comments(text: &[u8]) -> Vec<u8> {
+    let mut out = text.to_vec();
+    let n = out.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if out[i] == b'/' && out[i + 1] == b'*' {
+            let mut j = i + 2;
+            while j + 1 < n && !(out[j] == b'*' && out[j + 1] == b'/') {
+                j += 1;
+            }
+            let end = (j + 2).min(n);
+            for k in i..end {
+                out[k] = b' ';
+            }
+            i = end;
+            continue;
+        }
+        if out[i] == b'/' && out[i + 1] == b'/' {
+            let mut j = i + 2;
+            while j < n && out[j] != b'\n' {
+                j += 1;
+            }
+            for k in i..j {
+                out[k] = b' ';
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Scan `text` for printf write directives. Returns `(offset, directive_text)`
@@ -910,6 +961,224 @@ fn parse_printf_directive(tail: &[u8]) -> Option<(usize, bool)> {
         return None;
     }
     Some((i + 1, conv == b'n'))
+}
+
+// ---------------------------------------------------------------------------
+// Decorative internal whitespace layout
+// ---------------------------------------------------------------------------
+//
+// IOCCC-style obfuscation shapes code into rectangles, diamonds, and other
+// visual forms by padding internal whitespace between tokens. The hallmark:
+// many lines have multiple multi-character whitespace runs *between* code
+// tokens (not just leading indent). Real code rarely does this — at most one
+// internal alignment run per line for end-of-line comments, never several.
+
+const DECORATIVE_MIN_RUN_LEN: usize = 4;
+const DECORATIVE_MIN_RUNS_PER_LINE: usize = 2;
+const DECORATIVE_MIN_FILE_LINES: usize = 20;
+const DECORATIVE_MIN_FRACTION: f32 = 0.30;
+const DECORATIVE_MIN_LINES: usize = 5;
+// Suppress if a single first-non-ws byte dominates decorative lines —
+// this catches `switch/case` tables where every line starts with `case`.
+const DECORATIVE_MAX_FIRST_BYTE_DOMINANCE: f32 = 0.70;
+// Suppress if run-start columns are highly clustered (column-aligned) —
+// this catches data arrays where each row aligns its literals to fixed
+// columns. Snapped distinct-columns / total-runs below this threshold
+// indicates structural alignment, not free-form decorative shaping.
+const DECORATIVE_MIN_DISTINCT_COL_RATIO: f32 = 0.10;
+
+fn emit_decorative_whitespace_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::C) {
+        return Vec::new();
+    }
+    let mut total_lines = 0usize;
+    let mut decorative_lines = 0usize;
+    let mut first_decorative_offset: Option<usize> = None;
+    let mut total_runs = 0usize;
+    let mut snapped_col_counts: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    let mut first_byte_counts: std::collections::HashMap<u8, usize> =
+        std::collections::HashMap::new();
+
+    let n = bytes.len();
+    let mut line_start = 0usize;
+    for i in 0..=n {
+        if i != n && bytes[i] != b'\n' {
+            continue;
+        }
+        let line_end = i;
+        let line = &bytes[line_start..line_end];
+        if let (Some(first_nws), Some(last_nws)) = (
+            line.iter().position(|&b| !is_layout_ws(b)),
+            line.iter().rposition(|&b| !is_layout_ws(b)),
+        ) {
+            total_lines += 1;
+            let mut runs: Vec<usize> = Vec::new();
+            collect_internal_ws_runs(
+                line,
+                first_nws,
+                last_nws,
+                line_start,
+                tokens,
+                DECORATIVE_MIN_RUN_LEN,
+                &mut runs,
+            );
+            if runs.len() >= DECORATIVE_MIN_RUNS_PER_LINE {
+                decorative_lines += 1;
+                first_decorative_offset.get_or_insert(line_start);
+                total_runs += runs.len();
+                for r in &runs {
+                    *snapped_col_counts.entry((r / 2) * 2).or_insert(0) += 1;
+                }
+                *first_byte_counts.entry(line[first_nws]).or_insert(0) += 1;
+            }
+        }
+        line_start = i + 1;
+    }
+
+    if total_lines < DECORATIVE_MIN_FILE_LINES || decorative_lines < DECORATIVE_MIN_LINES {
+        return Vec::new();
+    }
+    let fraction = decorative_lines as f32 / total_lines as f32;
+    if fraction < DECORATIVE_MIN_FRACTION {
+        return Vec::new();
+    }
+    // Filter: structural alignment via single-keyword tables.
+    let dominant_first_byte = first_byte_counts.values().copied().max().unwrap_or(0);
+    if (dominant_first_byte as f32 / decorative_lines as f32) >= DECORATIVE_MAX_FIRST_BYTE_DOMINANCE
+    {
+        return Vec::new();
+    }
+    // Filter: structural alignment via column-aligned data tables.
+    if total_runs > 0 {
+        let distinct_cols = snapped_col_counts.len();
+        if (distinct_cols as f32 / total_runs as f32) < DECORATIVE_MIN_DISTINCT_COL_RATIO {
+            return Vec::new();
+        }
+    }
+    let offset = first_decorative_offset.unwrap_or(0);
+    let (line, col) = index.locate(offset);
+    vec![Finding {
+        path: path.to_path_buf(),
+        byte_offset: offset,
+        line,
+        col,
+        pass: PassKind::Token,
+        kind: SignalKind::WhitespaceAnomaly,
+        severity: Severity::Warn,
+        confidence: 0.70,
+        message: format!(
+            "{}/{} lines ({:.0}%) have decorative internal whitespace layout (≥{} runs of ≥{} spaces between code tokens)",
+            decorative_lines,
+            total_lines,
+            fraction * 100.0,
+            DECORATIVE_MIN_RUNS_PER_LINE,
+            DECORATIVE_MIN_RUN_LEN,
+        ),
+        snippet: crate::finding::redact_snippet(&snippet_around(bytes, offset, 80)),
+        diff_introduced: false,
+    }]
+}
+
+fn is_layout_ws(b: u8) -> bool {
+    b == b' ' || b == b'\t'
+}
+
+/// Append run-start columns of maximal runs of ≥`min_len` whitespace bytes
+/// inside `line[first..=last]` that are not covered by a string-literal or
+/// comment token. Each appended value is the column (line-relative byte index)
+/// at which a qualifying run begins.
+fn collect_internal_ws_runs(
+    line: &[u8],
+    first: usize,
+    last: usize,
+    line_offset: usize,
+    tokens: &[Token],
+    min_len: usize,
+    out: &mut Vec<usize>,
+) {
+    let mut run_start: Option<usize> = None;
+    let mut k = first;
+    while k <= last {
+        let abs = line_offset + k;
+        let in_string_or_comment = token_at(tokens, abs)
+            .map(|t| matches!(t.kind, TokenKind::StringLiteral | TokenKind::Comment))
+            .unwrap_or(false);
+        let counts = is_layout_ws(line[k]) && !in_string_or_comment;
+        if counts {
+            if run_start.is_none() {
+                run_start = Some(k);
+            }
+        } else if let Some(s) = run_start.take() {
+            if k - s >= min_len {
+                out.push(s);
+            }
+        }
+        k += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backslash line continuation outside `#` directives and string literals
+// ---------------------------------------------------------------------------
+//
+// `\<newline>` is the preprocessor line-continuation marker. Real code uses
+// it inside `#define` macros and (rarely) inside long string literals. Using
+// it inside a function body or expression is a strong obfuscation signal —
+// IOCCC entries break expressions across line boundaries to fit a visual
+// shape.
+
+fn emit_line_continuation_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::C) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    let n = bytes.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if bytes[i] == b'\\' && bytes[i + 1] == b'\n' {
+            // Skip if the `\` is inside a comment (which covers `#` directives
+            // in our C tokenizer) or string literal.
+            let inside = token_at(tokens, i).map(|t| t.kind);
+            if !matches!(
+                inside,
+                Some(TokenKind::Comment) | Some(TokenKind::StringLiteral)
+            ) {
+                let (line, col) = index.locate(i);
+                findings.push(Finding {
+                    path: path.to_path_buf(),
+                    byte_offset: i,
+                    line,
+                    col,
+                    pass: PassKind::Token,
+                    kind: SignalKind::LineContinuationInCode,
+                    severity: Severity::Warn,
+                    confidence: 0.75,
+                    message:
+                        "backslash line continuation in code (not a `#define` or string literal)"
+                            .to_string(),
+                    snippet: crate::finding::redact_snippet(&snippet_around(bytes, i, 60)),
+                    diff_introduced: false,
+                });
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    findings
 }
 
 fn is_simple_identifier(s: &str) -> bool {
@@ -1298,6 +1567,31 @@ mod tests {
     }
 
     #[test]
+    fn percent_n_inside_define_block_comment_does_not_fire() {
+        // SQLite-style: `#define SIZE 4 /* ... %n */` — the %n is in a
+        // documentation comment within the directive line, not in the
+        // macro replacement.
+        let src = b"#define SIZE 4 /* Number of chars processed. %n */\n";
+        let findings = run_fmt_write(src, Language::C);
+        assert!(
+            findings.is_empty(),
+            "%n in /* */ inside #define must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn percent_n_inside_define_line_comment_does_not_fire() {
+        let src = b"#define SIZE 4 // size; %n means write\n";
+        let findings = run_fmt_write(src, Language::C);
+        assert!(
+            findings.is_empty(),
+            "%n in // inside #define must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
     fn format_string_write_skipped_for_non_c() {
         let src = br#"printf("%n", &x)"#;
         for lang in [Language::Python, Language::Rust, Language::JavaScript] {
@@ -1316,6 +1610,209 @@ mod tests {
         // length modifier, n conversion.
         let r = parse_printf_directive(b"%1$*2$.*3$lln,");
         assert_eq!(r, Some((13, true)));
+    }
+
+    // --- decorative whitespace layout detection ---
+
+    fn run_decorative(src: &[u8], lang: Language) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, lang);
+        emit_decorative_whitespace_findings(&PathBuf::from("test.c"), src, &idx, lang, &tokens)
+    }
+
+    #[test]
+    fn decorative_layout_fires_when_threshold_met() {
+        // 25 lines with internal whitespace runs at *varying* columns and
+        // *varying* leading characters — the IOCCC shape signature, not an
+        // aligned-table signature. Each line starts with a different byte
+        // and its runs sit at different offsets.
+        let lines = [
+            "(   a    +    1)",
+            "+    b   *    2",
+            "[c    -    3]",
+            "*d    +    4",
+            "/   e    %    5",
+            "{f    >>    6}",
+            "<g    <<    7>",
+            "&   h    |    8",
+            "^i    !    9",
+            "%j    ~    a",
+        ];
+        let mut src = String::new();
+        // 30 lines: cycle through 10 patterns 3 times to keep first-byte
+        // dominance below 70% and run-start columns well-distributed.
+        for cycle in 0..3 {
+            for line in &lines {
+                src.push_str(&format!("{}{};\n", line, cycle));
+            }
+        }
+        let findings = run_decorative(src.as_bytes(), Language::C);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::WhitespaceAnomaly)
+            .expect("expected WhitespaceAnomaly for decorative layout");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("decorative"));
+    }
+
+    #[test]
+    fn decorative_layout_suppressed_for_case_table() {
+        // switch/case alignment table: every decorative line begins with
+        // `case` — first-byte dominance hits 100%, so the heuristic must
+        // back off.
+        let mut src = String::from("switch (op) {\n");
+        for n in 0..30 {
+            src.push_str(&format!(
+                "  case OP_{:02}:        zOp = \"OP_{:02}\";        break;\n",
+                n, n
+            ));
+        }
+        src.push_str("}\n");
+        let findings = run_decorative(src.as_bytes(), Language::C);
+        assert!(
+            findings.is_empty(),
+            "switch/case table must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn decorative_layout_suppressed_for_aligned_data_table() {
+        // Char-literal data array with rows column-aligned at the same
+        // offsets — distinct-snapped-cols / total-runs is tiny.
+        let row = "    'a',       'b',       'c',       'd',       'e',       'f',       'g',\n";
+        let mut src = String::from("char arr[] = {\n");
+        for _ in 0..40 {
+            src.push_str(row);
+        }
+        src.push_str("};\n");
+        let findings = run_decorative(src.as_bytes(), Language::C);
+        assert!(
+            findings.is_empty(),
+            "column-aligned data table must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn decorative_layout_skipped_below_min_lines() {
+        // Only 10 lines — below DECORATIVE_MIN_FILE_LINES (20).
+        let mut src = String::new();
+        for _ in 0..10 {
+            src.push_str("x    =    1;\n");
+        }
+        let findings = run_decorative(src.as_bytes(), Language::C);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn decorative_layout_skipped_at_low_fraction() {
+        // 30 lines but only 4 decorative — under 30%.
+        let mut src = String::new();
+        for _ in 0..4 {
+            src.push_str("x    =    1;\n");
+        }
+        for _ in 0..26 {
+            src.push_str("int a = 0;\n");
+        }
+        let findings = run_decorative(src.as_bytes(), Language::C);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn decorative_layout_ignores_runs_inside_string_literals() {
+        // 25 lines whose ≥4-space runs lie entirely inside string literals.
+        let mut src = String::new();
+        for _ in 0..25 {
+            src.push_str("char *s = \"a    b    c\";\n");
+        }
+        let findings = run_decorative(src.as_bytes(), Language::C);
+        assert!(
+            findings.is_empty(),
+            "string-literal whitespace must not count: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn decorative_layout_ignores_leading_indent() {
+        // 25 lines with deep leading indent but no internal runs.
+        let mut src = String::new();
+        for _ in 0..25 {
+            src.push_str("                int a = 0;\n");
+        }
+        let findings = run_decorative(src.as_bytes(), Language::C);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn decorative_layout_skipped_for_non_c() {
+        let mut src = String::new();
+        for _ in 0..25 {
+            src.push_str("x    =    1\n");
+        }
+        for lang in [Language::Python, Language::Rust, Language::JavaScript] {
+            let findings = run_decorative(src.as_bytes(), lang);
+            assert!(
+                findings.is_empty(),
+                "WhitespaceAnomaly (decorative) must only fire for C, fired for {:?}",
+                lang
+            );
+        }
+    }
+
+    // --- line continuation in code detection ---
+
+    fn run_line_cont(src: &[u8], lang: Language) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, lang);
+        emit_line_continuation_findings(&PathBuf::from("test.c"), src, &idx, lang, &tokens)
+    }
+
+    #[test]
+    fn line_continuation_in_expression_is_warn() {
+        let src = b"int main(){int x = 1 + \\\n2; return x;}\n";
+        let findings = run_line_cont(src, Language::C);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::LineContinuationInCode)
+            .expect("expected LineContinuationInCode for `\\<nl>` in expression");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn line_continuation_inside_define_does_not_fire() {
+        let src = b"#define FOO(x) \\\n  ((x) + 1)\nint y;\n";
+        let findings = run_line_cont(src, Language::C);
+        assert!(
+            findings.is_empty(),
+            "`\\<nl>` inside #define must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn line_continuation_inside_string_does_not_fire() {
+        let src = b"const char *s = \"line1 \\\nline2\";\n";
+        let findings = run_line_cont(src, Language::C);
+        assert!(
+            findings.is_empty(),
+            "`\\<nl>` inside string literal must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn line_continuation_skipped_for_non_c() {
+        let src = b"x = 1 + \\\n2\n";
+        for lang in [Language::Python, Language::Rust, Language::JavaScript] {
+            let findings = run_line_cont(src, lang);
+            assert!(
+                findings.is_empty(),
+                "LineContinuationInCode must only fire for C, fired for {:?}",
+                lang
+            );
+        }
     }
 
     #[test]

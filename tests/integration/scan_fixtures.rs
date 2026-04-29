@@ -409,6 +409,46 @@ fn c_printf_fixture_emits_format_string_write() {
 }
 
 #[test]
+fn c_notation_fixture_emits_kr_main_decorative_and_line_continuation() {
+    // IOCCC notation.c is shaped like a chess board: K&R-style main with no
+    // return type, decorative internal whitespace forming the visual layout,
+    // and `\<nl>` continuations splitting expressions across line breaks.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/notation.c"))
+        .expect("c/notation.c fixture was scanned");
+
+    let kr = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::LegacyKAndRMain)
+        .expect("expected LegacyKAndRMain on notation.c");
+    assert_eq!(kr.severity, disclude::finding::Severity::Warn);
+    assert!(kr.message.contains("K&R"));
+
+    let deco = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::WhitespaceAnomaly)
+        .expect("expected decorative WhitespaceAnomaly on notation.c");
+    assert_eq!(deco.severity, disclude::finding::Severity::Warn);
+    assert!(
+        deco.message.contains("decorative"),
+        "expected decorative message, got: {}",
+        deco.message
+    );
+
+    let cont = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::LineContinuationInCode)
+        .expect("expected LineContinuationInCode on notation.c");
+    assert_eq!(cont.severity, disclude::finding::Severity::Warn);
+}
+
+#[test]
 fn ts_clean_fixture_emits_no_findings() {
     let r = run();
     let clean = r

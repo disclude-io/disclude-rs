@@ -42,6 +42,8 @@ pub enum SignalKind {
     InstallHookShellout,
     NumericLiteralPayload,
     FormatStringWrite,
+    LegacyKAndRMain,
+    LineContinuationInCode,
 }
 
 impl SignalKind {
@@ -71,6 +73,8 @@ impl SignalKind {
             SignalKind::InstallHookShellout => "install-hook-shellout",
             SignalKind::NumericLiteralPayload => "numeric-literal-payload",
             SignalKind::FormatStringWrite => "format-string-write",
+            SignalKind::LegacyKAndRMain => "legacy-k-and-r-main",
+            SignalKind::LineContinuationInCode => "line-continuation-in-code",
         }
     }
 }
