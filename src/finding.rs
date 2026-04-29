@@ -39,6 +39,7 @@ pub enum SignalKind {
     BuildScriptShellout,
     ProcMacroPresence,
     InstallHookShellout,
+    NumericLiteralPayload,
 }
 
 impl SignalKind {
@@ -65,6 +66,7 @@ impl SignalKind {
             SignalKind::BuildScriptShellout => "build-script-shellout",
             SignalKind::ProcMacroPresence => "proc-macro-presence",
             SignalKind::InstallHookShellout => "install-hook-shellout",
+            SignalKind::NumericLiteralPayload => "numeric-literal-payload",
         }
     }
 }

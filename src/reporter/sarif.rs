@@ -169,6 +169,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::BuildScriptShellout,
     SignalKind::ProcMacroPresence,
     SignalKind::InstallHookShellout,
+    SignalKind::NumericLiteralPayload,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -194,6 +195,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::BuildScriptShellout => "BuildScriptShellout",
         SignalKind::ProcMacroPresence => "ProcMacroPresence",
         SignalKind::InstallHookShellout => "InstallHookShellout",
+        SignalKind::NumericLiteralPayload => "NumericLiteralPayload",
     }
 }
 
@@ -232,6 +234,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::ProcMacroPresence => "Crate defines a proc-macro (runs at compile time)",
         SignalKind::InstallHookShellout => "package.json install hook shells out",
+        SignalKind::NumericLiteralPayload => {
+            "Wide-numeric array reinterpreted via byte-pointer cast (data smuggling)"
+        }
     }
 }
 
@@ -240,7 +245,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         SignalKind::UnicodeBidi
         | SignalKind::DynamicExecution
         | SignalKind::DynamicImport
-        | SignalKind::BuildScriptShellout => Severity::Critical,
+        | SignalKind::BuildScriptShellout
+        | SignalKind::NumericLiteralPayload => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

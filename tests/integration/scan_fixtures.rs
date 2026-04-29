@@ -296,6 +296,67 @@ fn ts_tag_smuggling_fixture_emits_unicode_surrogate() {
 }
 
 #[test]
+fn c_bonsai_fixture_emits_numeric_literal_payload() {
+    // bonsai.c hides bytes inside a `double O[19]` array and reads them via
+    // `((char*)&O[_])[r()]` and `((char*)(O+14))`. The C AST pass should fire
+    // a single NumericLiteralPayload (CRITICAL) covering all cast sites.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/bonsai.c"))
+        .expect("c/bonsai.c fixture was scanned");
+    let hits: Vec<_> = file
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::NumericLiteralPayload)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one NumericLiteralPayload (deduped per array), got: {:?}",
+        hits
+    );
+    assert_eq!(hits[0].severity, disclude::finding::Severity::Critical);
+    assert!(
+        hits[0].message.contains("`O`"),
+        "expected message to cite array name, got: {}",
+        hits[0].message
+    );
+    assert!(
+        hits[0].message.contains("byte-pointer cast"),
+        "expected cast clause, got: {}",
+        hits[0].message
+    );
+}
+
+#[test]
+fn c_bonsai_fixture_emits_identifier_low_length() {
+    // bonsai.c is IOCCC-style: many single-letter globals/functions
+    // (`A`, `O`, `w`, `r`, `L`, `P`, `S`, `Q`, …) but with system-call
+    // keywords (`extern`, `nanosleep`, `gettimeofday`, `TIOCGWINSZ`) that
+    // pull the mean identifier length above 2.0. The single-char-fraction
+    // trigger should still fire it.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/bonsai.c"))
+        .expect("c/bonsai.c fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::IdentifierLowLength)
+        .expect("expected IdentifierLowLength on bonsai.c");
+    assert_eq!(hit.severity, disclude::finding::Severity::Info);
+    assert!(
+        hit.message.contains("single-character"),
+        "expected single-char-trigger message, got: {}",
+        hit.message
+    );
+}
+
+#[test]
 fn ts_clean_fixture_emits_no_findings() {
     let r = run();
     let clean = r

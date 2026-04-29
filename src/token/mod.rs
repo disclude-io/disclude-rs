@@ -282,11 +282,34 @@ fn emit_identifier_findings(
         }
     }
 
-    // File-level low-mean-length signal. Require a minimum sample size so we
-    // don't flag small one-off scripts.
+    // File-level naming-shape signals. Two complementary triggers:
+    //   (a) Mean non-conventional identifier length < 2.0 — catches files
+    //       where almost every name is 1-2 chars on average.
+    //   (b) ≥ 40% of non-conventional identifiers are exactly one character
+    //       — catches IOCCC-style obfuscation where many globals/functions
+    //       are single letters but a handful of keywords (`extern`, `void`,
+    //       `nanosleep`, `TIOCGWINSZ`, …) inflate the mean above 2.0.
     if ident_lengths.len() >= 20 {
-        let mean = ident_lengths.iter().sum::<usize>() as f32 / ident_lengths.len() as f32;
-        if mean < 2.0 {
+        let total = ident_lengths.len();
+        let mean = ident_lengths.iter().sum::<usize>() as f32 / total as f32;
+        let single_char = ident_lengths.iter().filter(|&&n| n == 1).count();
+        let single_frac = single_char as f32 / total as f32;
+        let message = if mean < 2.0 {
+            Some(format!(
+                "mean non-conventional identifier length {:.2} over {} names",
+                mean, total
+            ))
+        } else if total >= 30 && single_frac >= 0.4 {
+            Some(format!(
+                "{} of {} non-conventional identifiers are single-character ({:.0}%)",
+                single_char,
+                total,
+                single_frac * 100.0
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = message {
             // Anchor the finding at the start of the file — this is a
             // file-level observation, not a per-identifier one.
             findings.push(Finding {
@@ -298,11 +321,7 @@ fn emit_identifier_findings(
                 kind: SignalKind::IdentifierLowLength,
                 severity: Severity::Info,
                 confidence: 0.50,
-                message: format!(
-                    "mean non-conventional identifier length {:.2} over {} names",
-                    mean,
-                    ident_lengths.len()
-                ),
+                message,
                 snippet: String::new(),
                 diff_introduced: false,
             });
@@ -710,6 +729,64 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].severity, Severity::Info);
         assert!(!out[0].message.contains("mostly string/comment"));
+    }
+
+    fn run_emit_idents(src: &[u8], lang: Language) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, lang);
+        emit_identifier_findings(&PathBuf::from("test.c"), src, &idx, lang, &tokens)
+    }
+
+    #[test]
+    fn high_single_char_fraction_fires_low_length_signal() {
+        // 30 1-letter non-conventional names + a sprinkling of keywords.
+        // The mean stays above 2.0 but the single-char fraction does not.
+        let mut src = String::new();
+        for ch in b'a'..=b'z' {
+            // skip the conventional shorts (i, j, k, m, n, x, y, z)
+            if matches!(ch, b'i' | b'j' | b'k' | b'm' | b'n' | b'x' | b'y' | b'z') {
+                continue;
+            }
+            src.push_str(&format!("int {}=0;", ch as char));
+        }
+        // 4 distinct uppercase singles → push the count past 30.
+        for ch in [b'A', b'B', b'C', b'D'] {
+            src.push_str(&format!("int {}=0;", ch as char));
+        }
+        let findings = run_emit_idents(src.as_bytes(), Language::C);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::IdentifierLowLength)
+            .expect("expected IdentifierLowLength for high single-char fraction");
+        assert!(
+            hit.message.contains("single-character"),
+            "message should describe the single-char trigger, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn ordinary_identifiers_do_not_fire_low_length() {
+        // 30 well-formed identifiers, no single-char ones.
+        let names = [
+            "config", "parser", "result", "count", "buffer", "writer", "reader",
+            "stream", "source", "target", "value", "index", "limit", "offset",
+            "length", "header", "footer", "client", "server", "request",
+            "response", "context", "session", "manager", "handler", "queue",
+            "worker", "logger", "filter", "encoder",
+        ];
+        let src = names
+            .iter()
+            .map(|n| format!("int {}=0;", n))
+            .collect::<String>();
+        let findings = run_emit_idents(src.as_bytes(), Language::C);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::IdentifierLowLength),
+            "no IdentifierLowLength expected, got: {:?}",
+            findings
+        );
     }
 
     #[test]
