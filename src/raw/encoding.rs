@@ -16,6 +16,7 @@ pub fn analyze(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
     let mut findings = Vec::new();
     findings.extend(find_base64_blobs(path, bytes, index));
     findings.extend(find_hex_escape_runs(path, bytes, index));
+    findings.extend(find_octal_escape_runs(path, bytes, index));
     findings
 }
 
@@ -214,6 +215,85 @@ fn find_hex_escape_runs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Fin
     findings
 }
 
+// ---------------------------------------------------------------------------
+// Octal escape runs (`\NNN\NNN...`) — same obfuscation class as hex escapes
+// but less recognizable, valid in C, Python, and JavaScript.
+// ---------------------------------------------------------------------------
+
+/// Minimum consecutive `\NNN` octal escapes before emitting a signal.
+/// Lower than the hex threshold because octal is rarely used in legitimate
+/// code — a run of 6+ is almost never accidental.
+const OCTAL_ESCAPE_THRESHOLD: usize = 6;
+
+/// Minimum Shannon entropy (bits/byte) of the decoded octal bytes. Filters
+/// out null-padding and other low-entropy repetitive patterns.
+const OCTAL_MIN_ENTROPY_BITS: f32 = 2.5;
+
+fn parse_octal_escape(bytes: &[u8], i: usize) -> Option<(u8, usize)> {
+    if bytes.get(i) != Some(&b'\\') {
+        return None;
+    }
+    let d0 = bytes.get(i + 1)?;
+    if !matches!(d0, b'0'..=b'7') {
+        return None;
+    }
+    let mut val = (d0 - b'0') as u32;
+    let mut len = 1usize;
+    for k in 2..=3usize {
+        match bytes.get(i + k) {
+            Some(&d) if matches!(d, b'0'..=b'7') => {
+                val = val * 8 + (d - b'0') as u32;
+                len += 1;
+            }
+            _ => break,
+        }
+    }
+    Some(((val & 0xFF) as u8, i + 1 + len))
+}
+
+fn find_octal_escape_runs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || !matches!(bytes.get(i + 1), Some(b'0'..=b'7')) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut count = 0usize;
+        let mut hist = [0u32; 256];
+        while let Some((v, next)) = parse_octal_escape(bytes, i) {
+            hist[v as usize] += 1;
+            count += 1;
+            i = next;
+        }
+        if count >= OCTAL_ESCAPE_THRESHOLD {
+            let entropy = shannon_entropy(&hist, count as u32);
+            if entropy < OCTAL_MIN_ENTROPY_BITS {
+                continue;
+            }
+            let (line, col) = index.locate(start);
+            findings.push(Finding {
+                path: path.to_path_buf(),
+                byte_offset: start,
+                line,
+                col,
+                pass: PassKind::Raw,
+                kind: SignalKind::EncodingOctal,
+                severity: Severity::Warn,
+                confidence: 0.65,
+                message: format!(
+                    "{} consecutive `\\NNN` octal escapes (entropy {:.1} bits/byte)",
+                    count, entropy
+                ),
+                snippet: redact_snippet(&snippet_around(bytes, start, 100)),
+                diff_introduced: false,
+            });
+        }
+    }
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +455,42 @@ mod tests {
         assert!(!findings
             .iter()
             .any(|f| f.kind == SignalKind::EncodingBase64));
+    }
+
+    #[test]
+    fn flags_octal_escape_run() {
+        // 8 distinct octal escapes — above threshold, sufficient entropy.
+        // \101\102\103\104\105\106\107\110 = ABCDEFGH
+        let src = br#"x = "\101\102\103\104\105\106\107\110""#;
+        let findings = run(src);
+        assert!(
+            findings.iter().any(|f| f.kind == SignalKind::EncodingOctal),
+            "expected octal finding: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn ignores_short_octal_run() {
+        // 3 octal escapes — well below the threshold of 6.
+        let src = br#"x = "\012\011\012""#;
+        let findings = run(src);
+        assert!(
+            !findings.iter().any(|f| f.kind == SignalKind::EncodingOctal),
+            "short octal run must not trigger: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn ignores_low_entropy_octal_run() {
+        // 8 identical null escapes — entropy 0, must be suppressed.
+        let src = br#"x = "\000\000\000\000\000\000\000\000""#;
+        let findings = run(src);
+        assert!(
+            !findings.iter().any(|f| f.kind == SignalKind::EncodingOctal),
+            "zero-entropy octal run must not trigger: {:?}",
+            findings
+        );
     }
 }

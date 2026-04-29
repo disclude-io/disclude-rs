@@ -170,6 +170,7 @@ fn reclassify(bytes: &[u8], findings: Vec<Finding>, tokens: &[Token]) -> Vec<Fin
                 SignalKind::HighComplexity
                 | SignalKind::EncodingBase64
                 | SignalKind::EncodingHex
+                | SignalKind::EncodingOctal
                 | SignalKind::EncodingEscapeSoup => match ctx {
                     Some(TokenKind::Comment) => {
                         f.severity = Severity::Info;
