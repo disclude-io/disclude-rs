@@ -269,10 +269,10 @@ fn name_is_local_to_enclosing_function(call: Node, bytes: &[u8], name: &str) -> 
     // Parameters live inside the function_declarator child.
     let mut walker = func.walk();
     for child in func.children(&mut walker) {
-        if child.kind() == "function_declarator" {
-            if declarator_has_parameter_named(child, bytes, name) {
-                return true;
-            }
+        if child.kind() == "function_declarator"
+            && declarator_has_parameter_named(child, bytes, name)
+        {
+            return true;
         }
         if child.kind() == "compound_statement" && body_declares_identifier(child, bytes, name) {
             return true;
@@ -327,10 +327,10 @@ fn declaration_declares_identifier(decl: Node, bytes: &[u8], name: &str) -> bool
     let mut cursor = decl.walk();
     for child in decl.children(&mut cursor) {
         match child.kind() {
-            "init_declarator" | "pointer_declarator" | "array_declarator" => {
-                if declarator_name(child, bytes) == Some(name) {
-                    return true;
-                }
+            "init_declarator" | "pointer_declarator" | "array_declarator"
+                if declarator_name(child, bytes) == Some(name) =>
+            {
+                return true;
             }
             "identifier" => {
                 let Ok(text) = std::str::from_utf8(&bytes[child.start_byte()..child.end_byte()])
