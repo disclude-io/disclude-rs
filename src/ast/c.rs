@@ -92,8 +92,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     };
     let index = LineIndex::new(bytes);
     let mut findings = Vec::new();
-    let mut cursor = root.walk();
-    walk(root, bytes, path, &index, &mut findings, &mut cursor);
+    walk(root, bytes, path, &index, &mut findings);
     let arrays = collect_numeric_arrays(root, bytes);
     if !arrays.is_empty() {
         check_numeric_payload_casts(root, bytes, path, &index, &mut findings, &arrays);
@@ -110,27 +109,24 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     }
 }
 
-fn walk<'a>(
-    node: Node<'a>,
-    bytes: &[u8],
-    path: &Path,
-    index: &LineIndex,
-    findings: &mut Vec<Finding>,
-    cursor: &mut tree_sitter::TreeCursor<'a>,
-) {
-    match node.kind() {
-        "call_expression" => {
-            check_call(node, bytes, path, index, findings);
-            check_recursive_main(node, bytes, path, index, findings);
+fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut Vec<Finding>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "call_expression" => {
+                check_call(node, bytes, path, index, findings);
+                check_recursive_main(node, bytes, path, index, findings);
+            }
+            "subscript_expression" => {
+                check_reverse_subscript(node, bytes, path, index, findings);
+            }
+            _ => {}
         }
-        "subscript_expression" => {
-            check_reverse_subscript(node, bytes, path, index, findings);
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
         }
-        _ => {}
-    }
-    for child in node.children(cursor) {
-        let mut sub = child.walk();
-        walk(child, bytes, path, index, findings, &mut sub);
     }
 }
 
@@ -669,26 +665,20 @@ struct NumericArray {
 
 fn collect_numeric_arrays(root: Node, bytes: &[u8]) -> Vec<NumericArray> {
     let mut out = Vec::new();
-    let mut cursor = root.walk();
-    walk_for_arrays(root, bytes, &mut out, &mut cursor);
-    out
-}
-
-fn walk_for_arrays<'a>(
-    node: Node<'a>,
-    bytes: &[u8],
-    out: &mut Vec<NumericArray>,
-    cursor: &mut tree_sitter::TreeCursor<'a>,
-) {
-    if node.kind() == "declaration" {
-        if let Some(arr) = parse_numeric_array(node, bytes) {
-            out.push(arr);
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "declaration" {
+            if let Some(arr) = parse_numeric_array(node, bytes) {
+                out.push(arr);
+            }
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
         }
     }
-    for child in node.children(cursor) {
-        let mut sub = child.walk();
-        walk_for_arrays(child, bytes, out, &mut sub);
-    }
+    out
 }
 
 fn parse_numeric_array(decl: Node, bytes: &[u8]) -> Option<NumericArray> {
@@ -730,8 +720,7 @@ fn check_numeric_payload_casts(
 ) {
     // (first_cast_offset, cast_count) keyed by array index.
     let mut hits: Vec<Option<(usize, usize)>> = vec![None; arrays.len()];
-    let mut cursor = root.walk();
-    walk_casts(root, bytes, arrays, &mut hits, &mut cursor);
+    walk_casts(root, bytes, arrays, &mut hits);
     for (i, hit) in hits.iter().enumerate() {
         let Some((offset, count)) = *hit else {
             continue;
@@ -762,25 +751,28 @@ fn check_numeric_payload_casts(
     }
 }
 
-fn walk_casts<'a>(
-    node: Node<'a>,
+fn walk_casts(
+    root: Node,
     bytes: &[u8],
     arrays: &[NumericArray],
     hits: &mut [Option<(usize, usize)>],
-    cursor: &mut tree_sitter::TreeCursor<'a>,
 ) {
-    if node.kind() == "cast_expression" {
-        if let Some(idx) = matches_byte_cast_of_array(node, bytes, arrays) {
-            let off = node.start_byte();
-            match &mut hits[idx] {
-                slot @ None => *slot = Some((off, 1)),
-                Some((_, count)) => *count += 1,
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "cast_expression" {
+            if let Some(idx) = matches_byte_cast_of_array(node, bytes, arrays) {
+                let off = node.start_byte();
+                match &mut hits[idx] {
+                    slot @ None => *slot = Some((off, 1)),
+                    Some((_, count)) => *count += 1,
+                }
             }
         }
-    }
-    for child in node.children(cursor) {
-        let mut sub = child.walk();
-        walk_casts(child, bytes, arrays, hits, &mut sub);
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
     }
 }
 
@@ -1134,14 +1126,16 @@ fn followed_by_compound_after_decls(children: &[Node], idx: usize) -> bool {
 }
 
 /// First identifier in a DFS traversal of `node`, or None if there isn't one.
-fn first_identifier_text<'a>(node: Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
-    if node.kind() == "identifier" {
-        return std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).ok();
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(s) = first_identifier_text(child, bytes) {
-            return Some(s);
+fn first_identifier_text<'a>(root: Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "identifier" {
+            return std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).ok();
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
         }
     }
     None

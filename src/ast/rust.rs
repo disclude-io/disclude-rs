@@ -67,8 +67,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
         contains_unsafe: false,
         is_build_rs,
     };
-    let mut cursor = root.walk();
-    walk(root, bytes, path, &index, &mut state, &mut cursor);
+    walk(root, bytes, path, &index, &mut state);
     AstOutcome {
         findings: state.findings,
         parse_error,
@@ -85,25 +84,24 @@ struct State {
     is_build_rs: bool,
 }
 
-fn walk<'a>(
-    node: Node<'a>,
-    bytes: &[u8],
-    path: &Path,
-    index: &LineIndex,
-    state: &mut State,
-    cursor: &mut tree_sitter::TreeCursor<'a>,
-) {
-    match node.kind() {
-        "call_expression" if state.is_build_rs => check_shellout(node, bytes, path, index, state),
-        "attribute_item" | "inner_attribute_item" if !state.proc_macro_emitted => {
-            check_proc_macro(node, bytes, path, index, state);
+fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, state: &mut State) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "call_expression" if state.is_build_rs => {
+                check_shellout(node, bytes, path, index, state);
+            }
+            "attribute_item" | "inner_attribute_item" if !state.proc_macro_emitted => {
+                check_proc_macro(node, bytes, path, index, state);
+            }
+            "unsafe_block" => state.contains_unsafe = true,
+            _ => {}
         }
-        "unsafe_block" => state.contains_unsafe = true,
-        _ => {}
-    }
-    for child in node.children(cursor) {
-        let mut sub = child.walk();
-        walk(child, bytes, path, index, state, &mut sub);
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
     }
 }
 

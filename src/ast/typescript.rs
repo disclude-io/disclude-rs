@@ -63,8 +63,7 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
     };
     let index = LineIndex::new(bytes);
     let mut findings = Vec::new();
-    let mut cursor = root.walk();
-    walk(root, bytes, path, &index, &mut findings, &mut cursor);
+    walk(root, bytes, path, &index, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -72,22 +71,19 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
     }
 }
 
-fn walk<'a>(
-    node: Node<'a>,
-    bytes: &[u8],
-    path: &Path,
-    index: &LineIndex,
-    findings: &mut Vec<Finding>,
-    cursor: &mut tree_sitter::TreeCursor<'a>,
-) {
-    match node.kind() {
-        "call_expression" => check_call(node, bytes, path, index, findings),
-        "new_expression" => check_new(node, bytes, path, index, findings),
-        _ => {}
-    }
-    for child in node.children(cursor) {
-        let mut sub = child.walk();
-        walk(child, bytes, path, index, findings, &mut sub);
+fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut Vec<Finding>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "call_expression" => check_call(node, bytes, path, index, findings),
+            "new_expression" => check_new(node, bytes, path, index, findings),
+            _ => {}
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
     }
 }
 
