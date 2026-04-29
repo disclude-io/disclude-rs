@@ -88,8 +88,8 @@ fn clean_fixture_emits_no_findings() {
 fn total_files_scanned_matches_fixture_count() {
     let r = run();
     assert!(
-        r.files_scanned >= 23,
-        "expected at least 21 fixture files, got {} — files: {:?}",
+        r.files_scanned >= 26,
+        "expected at least 26 fixture files, got {} — files: {:?}",
         r.files_scanned,
         r.files.iter().map(|fa| &fa.path).collect::<Vec<_>>()
     );
@@ -940,5 +940,167 @@ fn ts_jsfuck_fixture_emits_narrow_file_charset() {
         hit.message.contains('6'),
         "message should report 6 distinct characters, got: {}",
         hit.message
+    );
+}
+
+#[test]
+fn bash_eval_dynamic_fixture_emits_dynamic_execution_critical() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/eval_dynamic.sh"))
+        .expect("bash/eval_dynamic.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution finding on bash/eval_dynamic.sh");
+    assert!(
+        hit.message.contains("eval"),
+        "expected message to cite `eval`, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_pipe_to_shell_fixture_emits_dynamic_execution_warn() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/pipe_to_shell.sh"))
+        .expect("bash/pipe_to_shell.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Warn
+        })
+        .expect("expected Warn DynamicExecution finding on bash/pipe_to_shell.sh");
+    assert!(
+        hit.message.contains("bash"),
+        "expected message to cite `bash`, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_clean_fixture_emits_no_findings() {
+    let r = run();
+    let clean = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/clean.sh"))
+        .expect("bash/clean.sh fixture was scanned");
+    assert!(
+        clean.findings.is_empty(),
+        "bash clean fixture produced findings: {:?}",
+        clean.findings
+    );
+}
+
+#[test]
+fn bash_b64_dropper_fixture_emits_base64_and_pipe_to_shell() {
+    // Synthetic dropper based on the Linux malware pattern described in
+    // "Analysis of a Malicious Linux Script" (Medium, Shubh Andrew):
+    // a base64-encoded second-stage script is embedded in the file, decoded
+    // at runtime, and piped directly into bash — no disk write.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/b64_dropper.sh"))
+        .expect("bash/b64_dropper.sh fixture was scanned");
+
+    // Raw pass: the embedded base64 literal should be flagged.
+    file.findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncodingBase64)
+        .expect("expected EncodingBase64 finding on bash/b64_dropper.sh");
+
+    // AST pass: the pipeline ending in `bash` should be flagged.
+    let pipe_hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Warn
+        })
+        .expect("expected Warn DynamicExecution (pipe-to-shell) on bash/b64_dropper.sh");
+    assert!(
+        pipe_hit.message.contains("bash"),
+        "expected pipe message to cite `bash`, got: {}",
+        pipe_hit.message
+    );
+}
+
+#[test]
+fn bash_wget_exec_fixture_emits_dynamic_exec_critical() {
+    // Synthetic dropper based on the Linux malware pattern: fetches a binary
+    // disguised as a PNG image, stages it in a hidden /var/tmp directory,
+    // and replaces the current process via exec with a dynamic path.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/wget_exec.sh"))
+        .expect("bash/wget_exec.sh fixture was scanned");
+
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution on bash/wget_exec.sh");
+    assert!(
+        hit.message.contains("exec"),
+        "expected message to cite `exec`, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_obfuscate_fixture_emits_single_critical_eval() {
+    // Output of the `bash-obfuscate` npm tool: the original script is split
+    // into fragments stored in short variables (Az, Bz, …), then reassembled
+    // and executed via `eval "$Az$Bz$Cz…"`. The only signal should be the
+    // CRITICAL DynamicExecution on the eval line; the variable assignments on
+    // the preceding line are individually benign and should not fire.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("bash/bash-obfuscate.sh")
+        })
+        .expect("bash/bash-obfuscate.sh fixture was scanned");
+
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution on bash/bash-obfuscate.sh");
+    assert!(
+        hit.message.contains("eval"),
+        "expected message to cite `eval`, got: {}",
+        hit.message
+    );
+    assert_eq!(
+        file.findings.len(),
+        1,
+        "expected exactly 1 finding (the eval), got: {:?}",
+        file.findings
     );
 }

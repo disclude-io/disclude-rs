@@ -16,6 +16,7 @@ use crate::finding::{Finding, PassKind, Severity, SignalKind};
 use crate::language::Language;
 use crate::util::{snippet_around, LineIndex};
 
+pub mod bash;
 pub mod c;
 pub mod python;
 pub mod rust;
@@ -87,6 +88,7 @@ pub fn analyze(
 
 fn tokenize(bytes: &[u8], lang: Language) -> Vec<Token> {
     match lang {
+        Language::Bash => bash::tokenize(bytes),
         Language::C => c::tokenize(bytes),
         Language::Python => python::tokenize(bytes),
         Language::Rust => rust::tokenize(bytes),
@@ -249,6 +251,7 @@ fn is_conventional_short(ident: &str, lang: Language) -> bool {
         return true;
     }
     match lang {
+        Language::Bash => false,
         Language::C => false,
         Language::Python => ident.starts_with("__") && ident.ends_with("__"),
         Language::Rust => ident.starts_with('_'),
