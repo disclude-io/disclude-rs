@@ -270,9 +270,7 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::ImplicitIntFunction => {
             "Many functions in this file lack an explicit return type (pre-ANSI K&R style)"
         }
-        SignalKind::DynamicFormatString => {
-            "printf-family call uses a non-literal format string"
-        }
+        SignalKind::DynamicFormatString => "printf-family call uses a non-literal format string",
         SignalKind::EmbeddedNulInString => {
             "String literal contains an embedded NUL byte followed by more data"
         }

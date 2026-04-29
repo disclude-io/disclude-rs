@@ -177,7 +177,16 @@ fn check_call(
         _ => {}
     }
     if let Some(&(_, fmt_idx)) = PRINTF_FAMILY.iter().find(|(n, _)| *n == name) {
-        check_dynamic_format_string(node, name, fmt_idx, &positional, bytes, path, index, findings);
+        check_dynamic_format_string(
+            node,
+            name,
+            fmt_idx,
+            &positional,
+            bytes,
+            path,
+            index,
+            findings,
+        );
     }
 }
 
@@ -215,8 +224,7 @@ fn check_dynamic_format_string(
     if fmt_arg.kind() != "identifier" {
         return;
     }
-    let Ok(arg_name) = std::str::from_utf8(&bytes[fmt_arg.start_byte()..fmt_arg.end_byte()])
-    else {
+    let Ok(arg_name) = std::str::from_utf8(&bytes[fmt_arg.start_byte()..fmt_arg.end_byte()]) else {
         return;
     };
     if is_likely_macro_name(arg_name) {
@@ -266,9 +274,7 @@ fn name_is_local_to_enclosing_function(call: Node, bytes: &[u8], name: &str) -> 
                 return true;
             }
         }
-        if child.kind() == "compound_statement"
-            && body_declares_identifier(child, bytes, name)
-        {
+        if child.kind() == "compound_statement" && body_declares_identifier(child, bytes, name) {
             return true;
         }
     }
@@ -295,9 +301,7 @@ fn declarator_has_parameter_named(node: Node, bytes: &[u8], name: &str) -> bool 
 fn body_declares_identifier(body: Node, bytes: &[u8], name: &str) -> bool {
     let mut cursor = body.walk();
     for child in body.children(&mut cursor) {
-        if child.kind() == "declaration"
-            && declaration_declares_identifier(child, bytes, name)
-        {
+        if child.kind() == "declaration" && declaration_declares_identifier(child, bytes, name) {
             return true;
         }
         // Nested compound_statements (blocks) hide their own scope. We err
@@ -329,8 +333,7 @@ fn declaration_declares_identifier(decl: Node, bytes: &[u8], name: &str) -> bool
                 }
             }
             "identifier" => {
-                let Ok(text) =
-                    std::str::from_utf8(&bytes[child.start_byte()..child.end_byte()])
+                let Ok(text) = std::str::from_utf8(&bytes[child.start_byte()..child.end_byte()])
                 else {
                     continue;
                 };
@@ -1525,7 +1528,8 @@ main(int c,char *C[]) {
 
     #[test]
     fn implicit_int_modern_c_does_not_fire() {
-        let src = b"int f(void) { return 0; }\nvoid g(void) {}\nstatic int h(int x) { return x; }\n";
+        let src =
+            b"int f(void) { return 0; }\nvoid g(void) {}\nstatic int h(int x) { return x; }\n";
         let findings = run(src);
         assert!(findings
             .iter()
@@ -1548,8 +1552,7 @@ main(int c,char *C[]) {
     #[test]
     fn dynamic_format_string_local_var_does_not_fire() {
         // Local variable holding a literal — common pattern, suppress.
-        let src =
-            b"void f(int x) { const char *fmt = \"%d\"; printf(fmt, x); }\n";
+        let src = b"void f(int x) { const char *fmt = \"%d\"; printf(fmt, x); }\n";
         let findings = run(src);
         assert!(findings
             .iter()
@@ -1579,8 +1582,7 @@ main(int c,char *C[]) {
     #[test]
     fn dynamic_format_string_macro_does_not_fire() {
         // ALL_CAPS identifier is treated as a likely macro.
-        let src =
-            b"#define FMT \"%d\\n\"\nvoid f(int x) { printf(FMT, x); }\n";
+        let src = b"#define FMT \"%d\\n\"\nvoid f(int x) { printf(FMT, x); }\n";
         let findings = run(src);
         assert!(findings
             .iter()
