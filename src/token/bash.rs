@@ -231,13 +231,19 @@ mod tests {
         let toks = tokenize(b"# this is a comment\necho hi\n");
         assert!(toks.iter().any(|t| t.kind == TokenKind::Comment));
         let c = toks.iter().find(|t| t.kind == TokenKind::Comment).unwrap();
-        assert_eq!(&b"# this is a comment\necho hi\n"[c.start..c.end], b"# this is a comment");
+        assert_eq!(
+            &b"# this is a comment\necho hi\n"[c.start..c.end],
+            b"# this is a comment"
+        );
     }
 
     #[test]
     fn tokenizes_double_quoted_string() {
         let toks = tokenize(b"echo \"hello world\"\n");
-        let s = toks.iter().find(|t| t.kind == TokenKind::StringLiteral).unwrap();
+        let s = toks
+            .iter()
+            .find(|t| t.kind == TokenKind::StringLiteral)
+            .unwrap();
         let src = b"echo \"hello world\"\n";
         assert_eq!(&src[s.content_start..s.content_end], b"hello world");
     }
@@ -247,7 +253,10 @@ mod tests {
         // Single-quoted: backslash is NOT an escape — `\n` is literal backslash + n.
         let src = b"echo 'hello\\nworld'\n";
         let toks = tokenize(src);
-        let s = toks.iter().find(|t| t.kind == TokenKind::StringLiteral).unwrap();
+        let s = toks
+            .iter()
+            .find(|t| t.kind == TokenKind::StringLiteral)
+            .unwrap();
         assert_eq!(&src[s.content_start..s.content_end], b"hello\\nworld");
     }
 
@@ -262,7 +271,10 @@ mod tests {
     fn tokenizes_heredoc() {
         let src = b"cat <<EOF\nhello world\nEOF\n";
         let toks = tokenize(src);
-        let s = toks.iter().find(|t| t.kind == TokenKind::StringLiteral).unwrap();
+        let s = toks
+            .iter()
+            .find(|t| t.kind == TokenKind::StringLiteral)
+            .unwrap();
         assert_eq!(&src[s.content_start..s.content_end], b"hello world\n");
     }
 
@@ -278,7 +290,10 @@ mod tests {
     #[test]
     fn tokenizes_identifier() {
         let toks = tokenize(b"my_var=1\n");
-        let id = toks.iter().find(|t| t.kind == TokenKind::Identifier).unwrap();
+        let id = toks
+            .iter()
+            .find(|t| t.kind == TokenKind::Identifier)
+            .unwrap();
         assert_eq!(&b"my_var=1\n"[id.start..id.end], b"my_var");
     }
 
@@ -286,7 +301,10 @@ mod tests {
     fn dollar_sign_does_not_start_identifier() {
         // `$VAR` — the `$` is skipped, `VAR` is the identifier.
         let toks = tokenize(b"echo $VAR\n");
-        let ids: Vec<_> = toks.iter().filter(|t| t.kind == TokenKind::Identifier).collect();
+        let ids: Vec<_> = toks
+            .iter()
+            .filter(|t| t.kind == TokenKind::Identifier)
+            .collect();
         let src = b"echo $VAR\n";
         let names: Vec<_> = ids.iter().map(|t| &src[t.start..t.end]).collect();
         assert!(names.contains(&b"echo".as_slice()));

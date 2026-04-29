@@ -954,7 +954,10 @@ fn bash_eval_dynamic_fixture_emits_dynamic_execution_critical() {
     let hit = file
         .findings
         .iter()
-        .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == disclude::finding::Severity::Critical)
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
         .expect("expected CRITICAL DynamicExecution finding on bash/eval_dynamic.sh");
     assert!(
         hit.message.contains("eval"),
@@ -974,7 +977,10 @@ fn bash_pipe_to_shell_fixture_emits_dynamic_execution_warn() {
     let hit = file
         .findings
         .iter()
-        .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == disclude::finding::Severity::Warn)
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Warn
+        })
         .expect("expected Warn DynamicExecution finding on bash/pipe_to_shell.sh");
     assert!(
         hit.message.contains("bash"),

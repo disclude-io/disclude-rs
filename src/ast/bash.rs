@@ -183,7 +183,10 @@ fn emit_dynamic_exec(
         kind: SignalKind::DynamicExecution,
         severity: Severity::Critical,
         confidence: 0.85,
-        message: format!("`{}` called with a dynamic (variable/substitution) path", fn_name),
+        message: format!(
+            "`{}` called with a dynamic (variable/substitution) path",
+            fn_name
+        ),
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
