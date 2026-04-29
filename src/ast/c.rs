@@ -100,6 +100,8 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     }
     check_legacy_kr_main(root, bytes, path, &index, &mut findings);
     check_implicit_int_functions(root, bytes, path, &index, &mut findings);
+    check_reverse_subscript_macros(root, bytes, path, &index, &mut findings);
+    check_stringify_dereference_macros(root, bytes, path, &index, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -115,8 +117,15 @@ fn walk<'a>(
     findings: &mut Vec<Finding>,
     cursor: &mut tree_sitter::TreeCursor<'a>,
 ) {
-    if node.kind() == "call_expression" {
-        check_call(node, bytes, path, index, findings);
+    match node.kind() {
+        "call_expression" => {
+            check_call(node, bytes, path, index, findings);
+            check_recursive_main(node, bytes, path, index, findings);
+        }
+        "subscript_expression" => {
+            check_reverse_subscript(node, bytes, path, index, findings);
+        }
+        _ => {}
     }
     for child in node.children(cursor) {
         let mut sub = child.walk();
@@ -1138,6 +1147,295 @@ fn first_identifier_text<'a>(node: Node<'a>, bytes: &'a [u8]) -> Option<&'a str>
 }
 
 // ---------------------------------------------------------------------------
+// Reverse subscript notation (`N[ptr]` form, equivalent to `ptr[N]`)
+// ---------------------------------------------------------------------------
+//
+// In C, `a[b]` is defined as `*(a + b)`, so `2[arr]` and `arr[2]` are
+// equivalent. Real code essentially never indexes a pointer with the integer
+// on the left — it's a famous IOCCC trick.
+//
+// Two shapes:
+//   * AST: `subscript_expression` whose `argument` field is a `number_literal`
+//     — the direct `2[arr]` form that survives a clean parse.
+//   * Macro: `#define <name> [<expr>]` where the body is a bare bracketed
+//     expression. Used as `2 NAME` to construct a reverse subscript at the
+//     call site (the rational.c trick: `#define q [v+a]` → `2 q` ⇒ `2[v+a]`).
+
+fn check_reverse_subscript(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(arg) = node.child_by_field_name("argument") else {
+        return;
+    };
+    if arg.kind() != "number_literal" {
+        return;
+    }
+    // Suppress recovery artefacts: a subscript_expression nested in an
+    // ERROR ancestor is most likely a misparse, not real source. A single
+    // self-error (`node.is_error()`) is not enough — tree-sitter sometimes
+    // wraps a half-recovered macro continuation in a parent ERROR that
+    // joins the trailing `N` of one declaration with the `[expr]` of the
+    // next.
+    if has_error_ancestor(node) {
+        return;
+    }
+    push(
+        findings,
+        node,
+        bytes,
+        path,
+        index,
+        SignalKind::ReverseSubscriptNotation,
+        Severity::Warn,
+        0.90,
+        "subscript with integer literal on the left (`N[ptr]` is equivalent to `ptr[N]`)"
+            .to_string(),
+    );
+}
+
+fn has_error_ancestor(node: Node) -> bool {
+    let mut cursor = node;
+    while let Some(parent) = cursor.parent() {
+        if parent.kind() == "ERROR" || parent.is_error() {
+            return true;
+        }
+        cursor = parent;
+    }
+    false
+}
+
+fn check_reverse_subscript_macros(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut cursor = root.walk();
+    for top in root.children(&mut cursor) {
+        if top.kind() != "preproc_def" {
+            continue;
+        }
+        let Some(arg) = preproc_arg_child(top) else {
+            continue;
+        };
+        let body = match std::str::from_utf8(&bytes[arg.start_byte()..arg.end_byte()]) {
+            Ok(s) => s.trim(),
+            Err(_) => continue,
+        };
+        // `[...]` body: opens with `[`, closes with `]`, has at least one byte
+        // of content between. Excludes `[]` placeholders.
+        if body.len() < 3 || !body.starts_with('[') || !body.ends_with(']') {
+            continue;
+        }
+        let Some(name) = first_node_text_of_kind(top, bytes, "identifier") else {
+            continue;
+        };
+        push(
+            findings,
+            top,
+            bytes,
+            path,
+            index,
+            SignalKind::ReverseSubscriptNotation,
+            Severity::Warn,
+            0.90,
+            format!(
+                "`#define {} {}` — bracket-only macro body builds a reverse subscript at the call site (`N {}` ⇒ `N{}`)",
+                name, body, name, body
+            ),
+        );
+    }
+}
+
+#[allow(clippy::manual_find)]
+fn preproc_arg_child(node: Node) -> Option<Node> {
+    // The iterator's lifetime is tied to the cursor's stack frame, so we
+    // can't return `find(...)` directly without collecting first.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "preproc_arg" {
+            return Some(child);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Recursive `main()` call
+// ---------------------------------------------------------------------------
+//
+// Real programs never call `main` from inside themselves — the runtime is the
+// only legitimate caller. Calls to `main` from any function body in the same
+// TU are an IOCCC pattern (loop using `main` as the recursion vehicle, often
+// to thread state through `argc`/`argv`).
+
+fn check_recursive_main(
+    call: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "identifier" {
+        return;
+    }
+    if &bytes[func.start_byte()..func.end_byte()] != b"main" {
+        return;
+    }
+    // Suppress the K&R `main() { ... }` definition shape: tree-sitter
+    // wraps the bare signature in an `ERROR` whose direct child is the
+    // call_expression. A real recursive call sits inside a real expression
+    // context (return_statement, argument_list, parenthesized_expression,
+    // etc.), so its immediate parent will not be `ERROR`.
+    if call.parent().map(|p| p.kind()) == Some("ERROR") {
+        return;
+    }
+    // Also guard against a definition recovered as a top-level
+    // `expression_statement` immediately followed by a `compound_statement`
+    // (the second implicit-int recovery shape used by `check_implicit_int_functions`).
+    if let Some(parent) = call.parent() {
+        if parent.kind() == "expression_statement"
+            && parent.parent().map(|gp| gp.kind()) == Some("translation_unit")
+            && next_sibling_is_compound(parent)
+        {
+            return;
+        }
+    }
+    push(
+        findings,
+        call,
+        bytes,
+        path,
+        index,
+        SignalKind::RecursiveMainCall,
+        Severity::Warn,
+        0.90,
+        "`main` is called from within a function — recursion through main is an IOCCC pattern"
+            .to_string(),
+    );
+}
+
+fn next_sibling_is_compound(node: Node) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let mut cursor = parent.walk();
+    let kids: Vec<Node> = parent.children(&mut cursor).collect();
+    let Some(idx) = kids.iter().position(|n| n.id() == node.id()) else {
+        return false;
+    };
+    kids.get(idx + 1).map(|n| n.kind()) == Some("compound_statement")
+}
+
+// ---------------------------------------------------------------------------
+// Stringify-and-dereference (`*#param` in a function-like macro body)
+// ---------------------------------------------------------------------------
+//
+// In a `#define name(p) ...` body, the `#p` operator stringifies parameter
+// `p` into a string literal at expansion time. Combining it with a leading
+// `*` (`*#p`) dereferences the resulting literal to extract its first byte —
+// a one-character literal extraction trick used in IOCCC code (e.g.
+// `*c == *#v` to compare a runtime char against the first letter of a
+// macro-arg token). Token paste `##` is excluded.
+
+fn check_stringify_dereference_macros(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut cursor = root.walk();
+    for top in root.children(&mut cursor) {
+        if top.kind() != "preproc_function_def" {
+            continue;
+        }
+        let Some(arg) = preproc_arg_child(top) else {
+            continue;
+        };
+        let body = &bytes[arg.start_byte()..arg.end_byte()];
+        if !body_has_stringify_deref(body) {
+            continue;
+        }
+        let Some(name) = first_node_text_of_kind(top, bytes, "identifier") else {
+            continue;
+        };
+        push(
+            findings,
+            top,
+            bytes,
+            path,
+            index,
+            SignalKind::StringifyDereference,
+            Severity::Warn,
+            0.90,
+            format!(
+                "macro `{}` body contains `*#param` — stringify-then-dereference extracts a single character from a macro argument",
+                name
+            ),
+        );
+    }
+}
+
+fn body_has_stringify_deref(body: &[u8]) -> bool {
+    let mut i = 0;
+    while i < body.len() {
+        if body[i] != b'*' {
+            i += 1;
+            continue;
+        }
+        // Skip any whitespace (incl. backslash-newline line continuations)
+        // between `*` and `#`.
+        let mut j = i + 1;
+        while j < body.len() && is_macro_body_whitespace(body, j) {
+            j = advance_whitespace(body, j);
+        }
+        if j >= body.len() || body[j] != b'#' {
+            i += 1;
+            continue;
+        }
+        // Reject token paste `##`.
+        if j + 1 < body.len() && body[j + 1] == b'#' {
+            i = j + 2;
+            continue;
+        }
+        // Skip whitespace after `#`.
+        let mut k = j + 1;
+        while k < body.len() && is_macro_body_whitespace(body, k) {
+            k = advance_whitespace(body, k);
+        }
+        if k < body.len() && (body[k].is_ascii_alphabetic() || body[k] == b'_') {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_macro_body_whitespace(body: &[u8], i: usize) -> bool {
+    matches!(body[i], b' ' | b'\t' | b'\n' | b'\r')
+        || (body[i] == b'\\'
+            && i + 1 < body.len()
+            && (body[i + 1] == b'\n' || body[i + 1] == b'\r'))
+}
+
+fn advance_whitespace(body: &[u8], i: usize) -> usize {
+    if body[i] == b'\\' && i + 1 < body.len() && (body[i + 1] == b'\n' || body[i + 1] == b'\r') {
+        i + 2
+    } else {
+        i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1605,5 +1903,116 @@ main(int c,char *C[]) {
         assert!(findings
             .iter()
             .all(|f| f.kind != SignalKind::DynamicFormatString));
+    }
+
+    #[test]
+    fn reverse_subscript_direct_fires() {
+        let src = b"int f(int *a){return 2[a];}\n";
+        let findings = run(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::ReverseSubscriptNotation)
+            .expect("expected ReverseSubscriptNotation");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn reverse_subscript_normal_does_not_fire() {
+        let src = b"int f(int *a){return a[2];}\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::ReverseSubscriptNotation));
+    }
+
+    #[test]
+    fn reverse_subscript_macro_bracket_body_fires() {
+        let src = b"#define q [v+a]\nint v[10]; int f(int a){return 2[v+a];}\n";
+        let findings: Vec<_> = run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::ReverseSubscriptNotation)
+            .collect();
+        // One from the macro definition, one from the direct subscript.
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.message.contains("#define q")));
+    }
+
+    #[test]
+    fn reverse_subscript_normal_macro_body_does_not_fire() {
+        // A macro body that contains brackets but isn't a bare bracket
+        // expression — `b[1]` is the value, not a subscript fragment to
+        // splice onto an integer.
+        let src = b"#define c b[1]\nint b[3]; int f(){return c;}\n";
+        let findings: Vec<_> = run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::ReverseSubscriptNotation)
+            .collect();
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn recursive_main_call_fires() {
+        let src = b"int main(int a, char**b){if(a) return main(a-1,b); return 0;}\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::RecursiveMainCall)
+            .expect("expected RecursiveMainCall");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn recursive_main_kr_definition_does_not_fire() {
+        // K&R `main()` definition parses as ERROR + compound_statement —
+        // the call_expression has no function_definition ancestor, so we
+        // must NOT fire (it's a definition, not a recursive call).
+        let src = b"main()\n{\nreturn 0;\n}\n";
+        let findings: Vec<_> = run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::RecursiveMainCall)
+            .collect();
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn recursive_main_other_function_calling_main_fires() {
+        let src = b"int main(int a, char**b){return a;}\nvoid g(int a, char**b){main(a,b);}\n";
+        let findings: Vec<_> = run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::RecursiveMainCall)
+            .collect();
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn stringify_dereference_fires() {
+        let src = b"#define p(v) *#v\nint f(){return p(x);}\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::StringifyDereference)
+            .expect("expected StringifyDereference");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("`p`"));
+    }
+
+    #[test]
+    fn stringify_dereference_token_paste_does_not_fire() {
+        // `##` is token paste, not stringify; should not fire.
+        let src = b"#define cat(a,b) *##a##b\nint f(){return 0;}\n";
+        let findings: Vec<_> = run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::StringifyDereference)
+            .collect();
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn stringify_dereference_plain_stringify_does_not_fire() {
+        // `#x` alone (not preceded by `*`) is a normal stringify use.
+        let src = b"#define dump(x) printf(\"%s=%d\\n\", #x, x)\n";
+        let findings: Vec<_> = run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::StringifyDereference)
+            .collect();
+        assert!(findings.is_empty());
     }
 }

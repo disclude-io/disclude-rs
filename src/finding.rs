@@ -49,6 +49,9 @@ pub enum SignalKind {
     ImplicitIntFunction,
     DynamicFormatString,
     EmbeddedNulInString,
+    ReverseSubscriptNotation,
+    RecursiveMainCall,
+    StringifyDereference,
 }
 
 impl SignalKind {
@@ -85,6 +88,9 @@ impl SignalKind {
             SignalKind::ImplicitIntFunction => "implicit-int-function",
             SignalKind::DynamicFormatString => "dynamic-format-string",
             SignalKind::EmbeddedNulInString => "embedded-nul-in-string",
+            SignalKind::ReverseSubscriptNotation => "reverse-subscript-notation",
+            SignalKind::RecursiveMainCall => "recursive-main-call",
+            SignalKind::StringifyDereference => "stringify-dereference",
         }
     }
 }

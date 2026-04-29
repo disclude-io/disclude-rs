@@ -494,6 +494,51 @@ fn c_magritte_fixture_emits_implicit_int_dynamic_format_and_embedded_nul() {
 }
 
 #[test]
+fn c_rational_fixture_emits_reverse_subscript_recursive_main_and_stringify() {
+    // IOCCC rational.c packs three obfuscation signals:
+    //   * `#define q [v+a]` — bracket-only macro body forming `2 q` ⇒ `2[v+a]`
+    //   * `main(d, b)` recursive call from inside main()
+    //   * `*#v` stringify-then-dereference inside the `p` macro body
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/rational.c"))
+        .expect("c/rational.c fixture was scanned");
+
+    let rev = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::ReverseSubscriptNotation)
+        .expect("expected ReverseSubscriptNotation on rational.c");
+    assert_eq!(rev.severity, disclude::finding::Severity::Warn);
+    assert!(
+        rev.message.contains("#define q") || rev.message.contains("integer literal"),
+        "unexpected message: {}",
+        rev.message
+    );
+
+    let rec = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::RecursiveMainCall)
+        .expect("expected RecursiveMainCall on rational.c");
+    assert_eq!(rec.severity, disclude::finding::Severity::Warn);
+
+    let strg = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::StringifyDereference)
+        .expect("expected StringifyDereference on rational.c");
+    assert_eq!(strg.severity, disclude::finding::Severity::Warn);
+    assert!(
+        strg.message.contains("`p`"),
+        "expected macro name `p` in message, got: {}",
+        strg.message
+    );
+}
+
+#[test]
 fn c_defines_fixture_emits_macro_keyword_override_and_collision() {
     // IOCCC defines.c rebinds reserved C keywords via `#define` and packs
     // distinct identifiers that collapse to the same visual skeleton.

@@ -179,6 +179,9 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::ImplicitIntFunction,
     SignalKind::DynamicFormatString,
     SignalKind::EmbeddedNulInString,
+    SignalKind::ReverseSubscriptNotation,
+    SignalKind::RecursiveMainCall,
+    SignalKind::StringifyDereference,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -214,6 +217,9 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::ImplicitIntFunction => "ImplicitIntFunction",
         SignalKind::DynamicFormatString => "DynamicFormatString",
         SignalKind::EmbeddedNulInString => "EmbeddedNulInString",
+        SignalKind::ReverseSubscriptNotation => "ReverseSubscriptNotation",
+        SignalKind::RecursiveMainCall => "RecursiveMainCall",
+        SignalKind::StringifyDereference => "StringifyDereference",
     }
 }
 
@@ -273,6 +279,13 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::DynamicFormatString => "printf-family call uses a non-literal format string",
         SignalKind::EmbeddedNulInString => {
             "String literal contains an embedded NUL byte followed by more data"
+        }
+        SignalKind::ReverseSubscriptNotation => {
+            "Array indexed with the integer on the left (`N[ptr]` form)"
+        }
+        SignalKind::RecursiveMainCall => "main() is called from within a function in this TU",
+        SignalKind::StringifyDereference => {
+            "`*#param` pattern in a #define body — stringify-then-dereference"
         }
     }
 }
