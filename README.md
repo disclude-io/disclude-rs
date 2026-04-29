@@ -222,6 +222,11 @@ AST pass; language-specific.
 
 ## What is New
 
+### 1.2.0
+
+Updates to the public interface.
+
+
 ### 1.1.0
 
 Updates to the public interface.

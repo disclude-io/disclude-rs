@@ -87,13 +87,10 @@ struct ScanArgs {
     no_ast: bool,
 }
 
-/// Run the disclude CLI with the given arguments (without the binary name).
+/// Run the disclude CLI. `args[0]` should be the binary name (passed to clap as the program name).
 /// Returns Ok(0) for success, Ok(1) for findings (with --exit-code), or Err on failure.
 pub fn run_cli(args: Vec<String>) -> anyhow::Result<u8> {
-    let mut clap_args = vec!["disclude".to_string()];
-    clap_args.extend(args);
-
-    let cli = match Cli::try_parse_from(&clap_args) {
+    let cli = match Cli::try_parse_from(&args) {
         Ok(c) => c,
         Err(e) => {
             let code = e.exit_code() as u8;

@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args().collect();
     match disclude::run_cli(args) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
