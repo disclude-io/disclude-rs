@@ -449,6 +449,70 @@ fn c_notation_fixture_emits_kr_main_decorative_and_line_continuation() {
 }
 
 #[test]
+fn c_defines_fixture_emits_macro_keyword_override_and_collision() {
+    // IOCCC defines.c rebinds reserved C keywords via `#define` and packs
+    // distinct identifiers that collapse to the same visual skeleton.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/defines.c"))
+        .expect("c/defines.c fixture was scanned");
+
+    let overrides: Vec<&disclude::finding::Finding> = file
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::MacroKeywordOverride)
+        .collect();
+    assert!(
+        overrides.len() >= 3,
+        "expected ≥3 MacroKeywordOverride findings on defines.c, got {}: {:?}",
+        overrides.len(),
+        overrides
+    );
+    for f in &overrides {
+        assert_eq!(f.severity, disclude::finding::Severity::Warn);
+    }
+    let names: Vec<&str> = overrides
+        .iter()
+        .filter_map(|f| {
+            ["double", "char", "union"]
+                .iter()
+                .copied()
+                .find(|k| f.message.contains(*k))
+        })
+        .collect();
+    for kw in ["double", "char", "union"] {
+        assert!(
+            names.contains(&kw),
+            "expected `#define {}` override, got messages: {:?}",
+            kw,
+            overrides.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    let collisions: Vec<&disclude::finding::Finding> = file
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::IdentifierConfusableCollision)
+        .collect();
+    assert!(
+        collisions.len() >= 2,
+        "expected ≥2 IdentifierConfusableCollision findings on defines.c, got {}: {:?}",
+        collisions.len(),
+        collisions
+    );
+    for f in &collisions {
+        assert_eq!(f.severity, disclude::finding::Severity::Warn);
+        assert!(
+            f.message.contains("skeleton"),
+            "expected skeleton message, got: {}",
+            f.message
+        );
+    }
+}
+
+#[test]
 fn ts_clean_fixture_emits_no_findings() {
     let r = run();
     let clean = r

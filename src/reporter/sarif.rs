@@ -162,8 +162,10 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::WhitespaceAnomaly,
     SignalKind::IdentifierNarrowCharset,
     SignalKind::IdentifierLowLength,
+    SignalKind::IdentifierConfusableCollision,
     SignalKind::StringConcatConstruction,
     SignalKind::MacroAlias,
+    SignalKind::MacroKeywordOverride,
     SignalKind::DynamicExecution,
     SignalKind::DynamicImport,
     SignalKind::DynamicAttribute,
@@ -192,8 +194,10 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::WhitespaceAnomaly => "WhitespaceAnomaly",
         SignalKind::IdentifierNarrowCharset => "IdentifierNarrowCharset",
         SignalKind::IdentifierLowLength => "IdentifierLowLength",
+        SignalKind::IdentifierConfusableCollision => "IdentifierConfusableCollision",
         SignalKind::StringConcatConstruction => "StringConcatConstruction",
         SignalKind::MacroAlias => "MacroAlias",
+        SignalKind::MacroKeywordOverride => "MacroKeywordOverride",
         SignalKind::DynamicExecution => "DynamicExecution",
         SignalKind::DynamicImport => "DynamicImport",
         SignalKind::DynamicAttribute => "DynamicAttribute",
@@ -231,10 +235,14 @@ fn kind_short_description(k: SignalKind) -> &'static str {
             "Identifier uses only visually confusable characters"
         }
         SignalKind::IdentifierLowLength => "File-wide mean identifier length is unusually short",
+        SignalKind::IdentifierConfusableCollision => {
+            "Two distinct identifiers in the same file collapse to the same visual skeleton"
+        }
         SignalKind::StringConcatConstruction => {
             "String concatenation reconstructs a sensitive identifier"
         }
         SignalKind::MacroAlias => "Short C macro name aliases a sensitive function or syscall",
+        SignalKind::MacroKeywordOverride => "C `#define` rebinds a reserved keyword",
         SignalKind::DynamicExecution => "exec/eval/Function/setTimeout invoked on a non-literal",
         SignalKind::DynamicImport => "Import or require with a constructed specifier",
         SignalKind::DynamicAttribute => "Attribute access by runtime-constructed name",

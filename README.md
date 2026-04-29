@@ -2,6 +2,8 @@
 
 Scan a (C, Rust, Python, Typescript) source tree for signs that code is hiding its intent from a human reader: Unicode attacks, encoded payloads, dynamic execution patterns, and build-time escape hatches. This is not a general purpose vulnerability scanner. This is a tool to surface the techniques used to make malicious code look benign on review.
 
+Implemented in fast, multi-threaded Rust. Useful for humans, useful for AI agents: find areas for examination faster (and cheaper than) full code scans.
+
 ## Install
 
 ```
@@ -57,7 +59,7 @@ Language is detected from file extension or shebang line.
 
 ## How it works
 
-Each file passes through up to three analysis layers. Later layers refine earlier ones — for example, a base64 blob found in a comment is demoted to `info` by the token pass because encoded text in comments is common and low-risk.
+Each file passes through up to three analysis layers. Later layers refine earlier ones. For example, a base64 blob found in a comment is demoted to `info` by the token pass because encoded text in comments is common and low-risk.
 
 ```
 Raw pass   → byte-level: Unicode codepoints, encoded strings, entropy, line length
@@ -155,6 +157,8 @@ AST pass; tree-sitter.
 | Signal | Severity | Description |
 |---|---|---|
 | `macro-alias` | warn | Token pass. `#define <name> <replacement>` where the macro name is 1–2 characters and the replacement is a sensitive identifier (`write`, `read`, `open`, `system`, `exec*`, `popen`, `fork`, `kill`, `ptrace`, `syscall`, `dlopen`, `dlsym`, `mmap`, `mprotect`, `socket`, `connect`, `send`, `recv`, …). A common dropper trick: the syscall is renamed to a single letter so that simple keyword grep over the source misses it. Function-like macros and multi-token bodies are excluded. |
+| `macro-keyword-override` | warn | Token pass. `#define <keyword> <body>` where `<keyword>` is a reserved pre-C11 keyword (`int`, `char`, `double`, `union`, `for`, `return`, …) and the replacement body is non-empty. Rebinding a keyword silently changes what every later occurrence in the file means — an IOCCC favourite (`#define double(a,b) int`, `#define union static struct`). C11+ pseudo-keywords (`_Static_assert`, `_Generic`, `_Atomic`, `_Alignas`, `_Alignof`, `_Thread_local`, `_Noreturn`) are excluded because real codebases routinely polyfill them. Empty-body shims (`#define inline`) are excluded. |
+| `identifier-confusable-collision` | warn | Token pass. Two distinct identifiers in the same file collapse to the same visual skeleton after grouping confusable characters — round-O `0`/`O`/`o` and vertical-stroke `1`/`l`/`I` (lowercase `i` is excluded; its dot makes it visually distinct). Fires only when at least one position differs as digit-vs-letter (`_0` vs `_O`, `x0` vs `xO`); pure case-pair collisions like `Object`/`object` are excluded as a common C convention rather than the IOCCC digit-letter swap. |
 | `numeric-literal-payload` | critical | AST pass. A wide-numeric array (≥ 8 elements of `short`, `int`, `long`, `long long`, `float`, `double`, `long double`, `wchar_t`, `size_t`, `int16_t`/`int32_t`/`int64_t`, `uint16_t`/`uint32_t`/`uint64_t`, `intptr_t`, `uintptr_t`, …) that is later reinterpreted through a byte-pointer cast (`char *`, `unsigned char *`, `signed char *`, `int8_t *`, `uint8_t *`). Hides arbitrary bytes inside what looks like a table of floating-point or integer constants. Findings are deduped per array — one report per array citing the cast count. |
 | `format-string-write` | critical | Token pass. `printf`-family format string contains a `%n` write directive (`%n`, `%hhn`, `%hn`, `%ln`, `%lln`, with optional positional `%<digit>$…n`). The `n` conversion writes the byte-count-so-far into an `int *` argument — a memory write primitive seen almost exclusively in CTF/exploit code and IOCCC entries. Detected inside string literals and inside `#define` macro bodies (catches the IOCCC stringification trick `#define N(a) "%"#a"$hhn"`, where the `$hhn` directive tail is split across stringification). Comments mentioning `%n` are excluded — both standalone and embedded `/* ... */` / `// ...` inside `#define` lines. |
 | `legacy-k-and-r-main` | warn | AST pass. `main()` defined without an explicit return type — pre-ANSI K&R style (`main() { ... }` or `main(argc, argv) int argc; char **argv; { ... }`). Modern C requires `int main(...)`; the implicit-int form is undefined behaviour in C99+ and is a strong indicator of intentionally archaic source (IOCCC entries) or pre-1989 code. |

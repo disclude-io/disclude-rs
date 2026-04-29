@@ -64,6 +64,12 @@ pub fn analyze(
         path, bytes, index, lang, &tokens,
     ));
     findings.extend(emit_macro_alias_findings(path, bytes, index, lang, &tokens));
+    findings.extend(emit_macro_keyword_override_findings(
+        path, bytes, index, lang, &tokens,
+    ));
+    findings.extend(emit_identifier_collision_findings(
+        path, bytes, index, lang, &tokens,
+    ));
     findings.extend(emit_format_string_write_findings(
         path, bytes, index, lang, &tokens,
     ));
@@ -338,6 +344,144 @@ fn emit_identifier_findings(
         }
     }
 
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// Confusable identifier collision
+// ---------------------------------------------------------------------------
+//
+// Two identifiers in the same file that collapse to the same visual skeleton
+// — after grouping characters that are visually indistinguishable in common
+// monospace fonts — and where the two names disagree on a digit-vs-letter at
+// some position, are the IOCCC trick: a `0` standing in for `O`, or a `1`
+// standing in for `l` or `I`, to make two distinct identifiers look identical
+// on screen.
+//
+// Confusable groups (mapped to sentinel characters that don't appear in C
+// identifiers, to avoid spurious collisions with the canonical letter):
+//   * vertical-stroke chars `1` (digit one), `l` (lowercase L), `I` (cap I).
+//     Lowercase `i` is excluded — its dot makes it visually distinct.
+//   * round-O chars `0` (digit zero), `O` (cap O), `o` (lowercase o). All
+//     three render identically in many fonts.
+//
+// We additionally require that at least one pair of colliding names disagrees
+// at a position where one has a digit (`0` or `1`) and the other has a letter.
+// This excludes pure case-pair collisions like `Object`/`object` or
+// `IsVirtual`/`isVirtual` — both are extremely common C conventions and not
+// the IOCCC pattern. Length ≥ 2 avoids flagging single-char loop variables.
+
+const SK_STROKE: char = '\u{1}'; // sentinel for {1, l, I}
+const SK_ROUND: char = '\u{2}'; // sentinel for {0, O, o}
+
+fn skeleton(ident: &str) -> String {
+    ident
+        .chars()
+        .map(|c| match c {
+            '0' | 'O' | 'o' => SK_ROUND,
+            '1' | 'l' | 'I' => SK_STROKE,
+            other => other,
+        })
+        .collect()
+}
+
+fn render_skeleton(sk: &str) -> String {
+    sk.chars()
+        .map(|c| match c {
+            SK_STROKE => '|',
+            SK_ROUND => 'o',
+            other => other,
+        })
+        .collect()
+}
+
+/// True if some pair of names in the group disagrees at some character position
+/// where one side is a digit (`0`/`1`) and the other is a letter. Names in the
+/// same skeleton group already have the same length in characters.
+fn has_digit_letter_disagreement(names: &std::collections::HashMap<String, usize>) -> bool {
+    let names: Vec<Vec<char>> = names.keys().map(|n| n.chars().collect()).collect();
+    if names.len() < 2 {
+        return false;
+    }
+    let len = names[0].len();
+    for pos in 0..len {
+        let mut has_digit = false;
+        let mut has_letter = false;
+        for n in &names {
+            let c = n[pos];
+            if c == '0' || c == '1' {
+                has_digit = true;
+            } else if c.is_alphabetic() {
+                has_letter = true;
+            }
+        }
+        if has_digit && has_letter {
+            return true;
+        }
+    }
+    false
+}
+
+fn emit_identifier_collision_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::C) {
+        return Vec::new();
+    }
+    use std::collections::HashMap;
+    // skeleton -> map(name -> first_offset)
+    let mut groups: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for tok in tokens.iter().filter(|t| t.kind == TokenKind::Identifier) {
+        let Ok(name) = std::str::from_utf8(&bytes[tok.start..tok.end]) else {
+            continue;
+        };
+        if name.chars().count() < 2 {
+            continue;
+        }
+        let sk = skeleton(name);
+        if sk == name {
+            // No confusable substitutions — can't collide visually.
+            continue;
+        }
+        groups
+            .entry(sk)
+            .or_default()
+            .entry(name.to_string())
+            .or_insert(tok.start);
+    }
+    let mut findings = Vec::new();
+    let mut emitted: Vec<(String, usize)> = groups
+        .into_iter()
+        .filter(|(_, names)| names.len() >= 2 && has_digit_letter_disagreement(names))
+        .map(|(sk, names)| {
+            let first = names.values().min().copied().unwrap_or(0);
+            (sk, first)
+        })
+        .collect();
+    emitted.sort_by_key(|(_, off)| *off);
+    for (sk, first_offset) in emitted {
+        let (line, col) = index.locate(first_offset);
+        findings.push(Finding {
+            path: path.to_path_buf(),
+            byte_offset: first_offset,
+            line,
+            col,
+            pass: PassKind::Token,
+            kind: SignalKind::IdentifierConfusableCollision,
+            severity: Severity::Warn,
+            confidence: 0.80,
+            message: format!(
+                "two identifiers collapse to visual skeleton `{}` (0/O/o and 1/l/I are confusable)",
+                render_skeleton(&sk)
+            ),
+            snippet: crate::finding::redact_snippet(&snippet_around(bytes, first_offset, 80)),
+            diff_introduced: false,
+        });
+    }
     findings
 }
 
@@ -697,6 +841,147 @@ fn parse_define(content: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, replacement))
+}
+
+// ---------------------------------------------------------------------------
+// Macro keyword override
+// ---------------------------------------------------------------------------
+//
+// `#define double(a,b) int` and `#define char k['a']` rebind reserved C
+// keywords. Real code virtually never does this — every subsequent appearance
+// of the keyword is silently rewritten, which is the entire point: the source
+// looks like ordinary C while compiling to something else. The IOCCC
+// "defines.c" entry uses this trick on `double`, `char`, and `union`.
+//
+// We accept empty replacements (e.g. `#define inline` to delete the keyword
+// for old compilers) but flag anything that introduces a non-empty body.
+
+// Core, pre-C11 reserved keywords. C11+ pseudo-keywords (`_Static_assert`,
+// `_Generic`, `_Atomic`, `_Alignas`/`_Alignof`, `_Thread_local`, `_Noreturn`)
+// are intentionally excluded — every real codebase that supports C99/older
+// toolchains carries a polyfill `#define` for them, and those polyfills are
+// the dominant use of `#define <keyword>`.
+const C_KEYWORDS: &[&str] = &[
+    "void",
+    "char",
+    "short",
+    "int",
+    "long",
+    "float",
+    "double",
+    "signed",
+    "unsigned",
+    "_Bool",
+    "_Complex",
+    "_Imaginary",
+    "const",
+    "volatile",
+    "restrict",
+    "auto",
+    "register",
+    "static",
+    "extern",
+    "typedef",
+    "inline",
+    "struct",
+    "union",
+    "enum",
+    "if",
+    "else",
+    "switch",
+    "case",
+    "default",
+    "while",
+    "do",
+    "for",
+    "break",
+    "continue",
+    "return",
+    "goto",
+    "sizeof",
+];
+
+fn emit_macro_keyword_override_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::C) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    for tok in tokens.iter().filter(|t| t.kind == TokenKind::Comment) {
+        if bytes.get(tok.start) != Some(&b'#') {
+            continue;
+        }
+        let Ok(content) = std::str::from_utf8(&bytes[tok.content_start..tok.content_end]) else {
+            continue;
+        };
+        let Some((name, body)) = parse_define_loose(content) else {
+            continue;
+        };
+        if !C_KEYWORDS.contains(&name) {
+            continue;
+        }
+        if body.trim().is_empty() {
+            // Empty replacement — `#define const` style compat shim. Skip.
+            continue;
+        }
+        let (line, col) = index.locate(tok.start);
+        findings.push(Finding {
+            path: path.to_path_buf(),
+            byte_offset: tok.start,
+            line,
+            col,
+            pass: PassKind::Token,
+            kind: SignalKind::MacroKeywordOverride,
+            severity: Severity::Warn,
+            confidence: 0.85,
+            message: format!(
+                "`#define {}` rebinds the reserved C keyword `{}`",
+                name, name
+            ),
+            snippet: crate::finding::redact_snippet(&snippet_around(bytes, tok.start, 80)),
+            diff_introduced: false,
+        });
+    }
+    findings
+}
+
+/// Loose `#define` parser used by the keyword-override detector. Returns
+/// `(macro_name, replacement_text)` for object-like or function-like macros.
+/// Unlike `parse_define`, the replacement may be any text (multi-token,
+/// expression, etc.) and the name may be followed immediately by `(args)`.
+fn parse_define_loose(content: &str) -> Option<(&str, &str)> {
+    let body = content.trim_start();
+    let body = body.strip_prefix("define")?;
+    if !body.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    let body = body.trim_start();
+    // Identifier characters only: the name ends at the first non-identifier
+    // byte (whitespace, `(`, etc.). We don't drop `defined(...)` here because
+    // `define` was already consumed, but `defined` won't reach this code path
+    // — that's a `#if` directive with `defined()`, which won't start with the
+    // word `define` followed by whitespace.
+    let name_end = body
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(body.len());
+    if name_end == 0 {
+        return None;
+    }
+    let name = &body[..name_end];
+    let rest = &body[name_end..];
+    // Strip a function-like parameter list `(...)` if present.
+    let rest = if let Some(stripped) = rest.strip_prefix('(') {
+        let close = stripped.find(')')?;
+        stripped[close + 1..].trim_start()
+    } else {
+        rest.trim_start()
+    };
+    Some((name, rest))
 }
 
 // ---------------------------------------------------------------------------
@@ -1843,5 +2128,149 @@ mod tests {
             Some(TokenKind::StringLiteral)
         );
         assert!(token_at(&toks, 100).is_none());
+    }
+
+    // --- macro keyword override ---
+
+    fn run_macro_keyword(src: &[u8]) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, Language::C);
+        emit_macro_keyword_override_findings(
+            &PathBuf::from("test.c"),
+            src,
+            &idx,
+            Language::C,
+            &tokens,
+        )
+    }
+
+    #[test]
+    fn macro_keyword_override_fires_on_double_redefinition() {
+        let src = b"#define double(a,b) int\nmain() { return 0; }\n";
+        let findings = run_macro_keyword(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::MacroKeywordOverride)
+            .expect("expected MacroKeywordOverride for `#define double`");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("double"));
+    }
+
+    #[test]
+    fn macro_keyword_override_skips_empty_body() {
+        // Common compat shim style: `#define inline` to no-op on old compilers.
+        let src = b"#define inline\nstatic inline int f(void) { return 1; }\n";
+        let findings = run_macro_keyword(src);
+        assert!(
+            findings.is_empty(),
+            "empty body must not fire (compat shim): {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn macro_keyword_override_skips_c11_pseudo_keywords() {
+        // C11+ pseudo-keywords are routinely polyfilled in older codebases.
+        let src = b"#define _Static_assert(cond, msg) ((void)0)\n";
+        let findings = run_macro_keyword(src);
+        assert!(
+            findings.is_empty(),
+            "C11+ pseudo-keyword polyfill must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn macro_keyword_override_skipped_for_non_c() {
+        let src = b"#define double int\n";
+        let idx = LineIndex::new(src);
+        for lang in [Language::Python, Language::Rust, Language::JavaScript] {
+            let tokens = tokenize(src, lang);
+            let findings =
+                emit_macro_keyword_override_findings(&PathBuf::from("t"), src, &idx, lang, &tokens);
+            assert!(
+                findings.is_empty(),
+                "must only fire for C, fired for {:?}",
+                lang
+            );
+        }
+    }
+
+    // --- identifier confusable collision ---
+
+    fn run_collision(src: &[u8]) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, Language::C);
+        emit_identifier_collision_findings(
+            &PathBuf::from("test.c"),
+            src,
+            &idx,
+            Language::C,
+            &tokens,
+        )
+    }
+
+    #[test]
+    fn collision_fires_on_digit_zero_versus_cap_o() {
+        // `_0` vs `_O` collapse to the same skeleton via 0/O.
+        let src = b"int _0 = 1; int _O = 2; int use(void) { return _0 + _O; }\n";
+        let findings = run_collision(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::IdentifierConfusableCollision)
+            .expect("expected collision for _0 vs _O");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("skeleton"));
+    }
+
+    #[test]
+    fn collision_skips_pure_case_pairs() {
+        // `Object` vs `object` differ only in case — common C convention,
+        // not the IOCCC digit-letter swap. Must not fire.
+        let src = b"typedef struct Object_ Object;\nvoid f(Object *object) { (void)object; }\n";
+        let findings = run_collision(src);
+        assert!(
+            findings.is_empty(),
+            "pure case-pair must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn collision_skips_single_char_identifiers() {
+        // Loop counters `l` and `I` (cap I) — too short to matter.
+        let src = b"int f(void) { int l = 0, I = 1; return l + I; }\n";
+        let findings = run_collision(src);
+        assert!(
+            findings.is_empty(),
+            "single-char identifiers must not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn collision_skipped_for_non_c() {
+        let src = b"x_0 = 1; x_O = 2;\n";
+        let idx = LineIndex::new(src);
+        for lang in [Language::Python, Language::Rust, Language::JavaScript] {
+            let tokens = tokenize(src, lang);
+            let findings =
+                emit_identifier_collision_findings(&PathBuf::from("t"), src, &idx, lang, &tokens);
+            assert!(
+                findings.is_empty(),
+                "must only fire for C, fired for {:?}",
+                lang
+            );
+        }
+    }
+
+    #[test]
+    fn render_skeleton_uses_printable_sentinels() {
+        let sk = skeleton("x_0");
+        let rendered = render_skeleton(&sk);
+        assert_eq!(rendered, "x_o");
+        let sk2 = skeleton("_1l");
+        let rendered2 = render_skeleton(&sk2);
+        assert_eq!(rendered2, "_||");
     }
 }

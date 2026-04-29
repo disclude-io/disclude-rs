@@ -31,8 +31,10 @@ pub enum SignalKind {
     // token
     IdentifierNarrowCharset,
     IdentifierLowLength,
+    IdentifierConfusableCollision,
     StringConcatConstruction,
     MacroAlias,
+    MacroKeywordOverride,
     // ast
     DynamicExecution,
     DynamicImport,
@@ -63,8 +65,10 @@ impl SignalKind {
             SignalKind::WhitespaceAnomaly => "whitespace-anomaly",
             SignalKind::IdentifierNarrowCharset => "identifier-narrow-charset",
             SignalKind::IdentifierLowLength => "identifier-low-length",
+            SignalKind::IdentifierConfusableCollision => "identifier-confusable-collision",
             SignalKind::StringConcatConstruction => "string-concat-construction",
             SignalKind::MacroAlias => "macro-alias",
+            SignalKind::MacroKeywordOverride => "macro-keyword-override",
             SignalKind::DynamicExecution => "dynamic-execution",
             SignalKind::DynamicImport => "dynamic-import",
             SignalKind::DynamicAttribute => "dynamic-attribute",
