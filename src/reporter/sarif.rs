@@ -176,6 +176,9 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::FormatStringWrite,
     SignalKind::LegacyKAndRMain,
     SignalKind::LineContinuationInCode,
+    SignalKind::ImplicitIntFunction,
+    SignalKind::DynamicFormatString,
+    SignalKind::EmbeddedNulInString,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -208,6 +211,9 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::FormatStringWrite => "FormatStringWrite",
         SignalKind::LegacyKAndRMain => "LegacyKAndRMain",
         SignalKind::LineContinuationInCode => "LineContinuationInCode",
+        SignalKind::ImplicitIntFunction => "ImplicitIntFunction",
+        SignalKind::DynamicFormatString => "DynamicFormatString",
+        SignalKind::EmbeddedNulInString => "EmbeddedNulInString",
     }
 }
 
@@ -260,6 +266,15 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::LegacyKAndRMain => "main() defined without a return type (pre-ANSI K&R style)",
         SignalKind::LineContinuationInCode => {
             "Backslash line continuation outside preprocessor or string literal"
+        }
+        SignalKind::ImplicitIntFunction => {
+            "Many functions in this file lack an explicit return type (pre-ANSI K&R style)"
+        }
+        SignalKind::DynamicFormatString => {
+            "printf-family call uses a non-literal format string"
+        }
+        SignalKind::EmbeddedNulInString => {
+            "String literal contains an embedded NUL byte followed by more data"
         }
     }
 }

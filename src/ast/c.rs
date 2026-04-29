@@ -28,6 +28,43 @@ use crate::util::{snippet_around, LineIndex};
 
 const EXEC_FUNCTIONS: &[&str] = &["execl", "execlp", "execle", "execv", "execvp", "execve"];
 
+/// printf-family functions and the 0-based positional index of their format
+/// argument. The `v*` variants are intentionally excluded — they take a
+/// `va_list` and exist precisely so that the format string can be forwarded
+/// from a variadic wrapper, so a non-literal format is the norm rather than
+/// the exception.
+const PRINTF_FAMILY: &[(&str, usize)] = &[
+    ("printf", 0),
+    ("wprintf", 0),
+    ("fprintf", 1),
+    ("fwprintf", 1),
+    ("dprintf", 1),
+    ("sprintf", 1),
+    ("asprintf", 1),
+    ("snprintf", 2),
+    ("swprintf", 2),
+];
+
+/// Localization wrappers whose return value, while not a literal at parse
+/// time, resolves to a translated string-table entry at runtime. Excluded
+/// from DynamicFormatString because the format itself is a literal in
+/// some message catalog — not user-controlled data.
+const I18N_WRAPPERS: &[&str] = &[
+    "_",
+    "N_",
+    "Q_",
+    "C_",
+    "gettext",
+    "dgettext",
+    "dcgettext",
+    "ngettext",
+    "dngettext",
+    "dcngettext",
+    "pgettext",
+    "dpgettext",
+    "dcpgettext",
+];
+
 pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     let mut parser = Parser::new();
     if parser
@@ -62,6 +99,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
         check_numeric_payload_casts(root, bytes, path, &index, &mut findings, &arrays);
     }
     check_legacy_kr_main(root, bytes, path, &index, &mut findings);
+    check_implicit_int_functions(root, bytes, path, &index, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -138,6 +176,230 @@ fn check_call(
         }
         _ => {}
     }
+    if let Some(&(_, fmt_idx)) = PRINTF_FAMILY.iter().find(|(n, _)| *n == name) {
+        check_dynamic_format_string(node, name, fmt_idx, &positional, bytes, path, index, findings);
+    }
+}
+
+/// printf-family with a non-literal first format argument. We require that
+/// the format argument is a *bare identifier that is not declared inside the
+/// enclosing function* — i.e. a global or otherwise non-local. This is
+/// precisely the IOCCC pattern (`F = "%c"; printf(F, x)`) and it suppresses
+/// the legitimate-but-noisy cases:
+///   * forwarding a parameter `fmt` through `vfprintf(stream, fmt, ap)` —
+///     handled by excluding `v*` from PRINTF_FAMILY entirely;
+///   * picking a local format string `const char *fmt = cond ? "a" : "b";
+///     snprintf(buf, n, fmt, x)` — handled by the local-declaration scan.
+#[allow(clippy::too_many_arguments)]
+fn check_dynamic_format_string(
+    call: Node,
+    fn_name: &str,
+    fmt_idx: usize,
+    args: &[Node],
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(fmt_arg) = args.get(fmt_idx) else {
+        return;
+    };
+    if is_string_literal(*fmt_arg) {
+        return;
+    }
+    if call_to_i18n_wrapper(*fmt_arg, bytes) {
+        return;
+    }
+    // Require the format arg to be a *bare identifier* — otherwise it is
+    // likely an array index or struct field that we cannot reason about.
+    if fmt_arg.kind() != "identifier" {
+        return;
+    }
+    let Ok(arg_name) = std::str::from_utf8(&bytes[fmt_arg.start_byte()..fmt_arg.end_byte()])
+    else {
+        return;
+    };
+    if is_likely_macro_name(arg_name) {
+        // ALL_CAPS_WITH_UNDERSCORES is the universal C convention for
+        // preprocessor macros — `printf(FMT_SHORT, x)` almost always
+        // expands to a literal format string from a `#define`.
+        return;
+    }
+    if name_is_local_to_enclosing_function(call, bytes, arg_name) {
+        return;
+    }
+    push(
+        findings,
+        call,
+        bytes,
+        path,
+        index,
+        SignalKind::DynamicFormatString,
+        Severity::Warn,
+        0.80,
+        format!(
+            "`{}` called with a non-literal format string (format-string bug pattern)",
+            fn_name
+        ),
+    );
+}
+
+/// True if `name` is declared as a parameter or local of the function that
+/// contains `call`. Walks up to the enclosing `function_definition` and then
+/// scans its declarator parameters and body for matching identifiers.
+fn name_is_local_to_enclosing_function(call: Node, bytes: &[u8], name: &str) -> bool {
+    let mut cursor = call;
+    let func = loop {
+        let Some(parent) = cursor.parent() else {
+            return false;
+        };
+        if parent.kind() == "function_definition" {
+            break parent;
+        }
+        cursor = parent;
+    };
+    // Parameters live inside the function_declarator child.
+    let mut walker = func.walk();
+    for child in func.children(&mut walker) {
+        if child.kind() == "function_declarator" {
+            if declarator_has_parameter_named(child, bytes, name) {
+                return true;
+            }
+        }
+        if child.kind() == "compound_statement"
+            && body_declares_identifier(child, bytes, name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn declarator_has_parameter_named(node: Node, bytes: &[u8], name: &str) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "parameter_list" {
+            let mut pl = child.walk();
+            for param in child.children(&mut pl) {
+                if param.kind() == "parameter_declaration"
+                    && first_node_text_of_kind(param, bytes, "identifier") == Some(name)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn body_declares_identifier(body: Node, bytes: &[u8], name: &str) -> bool {
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if child.kind() == "declaration"
+            && declaration_declares_identifier(child, bytes, name)
+        {
+            return true;
+        }
+        // Nested compound_statements (blocks) hide their own scope. We err
+        // on the side of FN suppression: any inner declaration of the name
+        // counts.
+        if (child.kind() == "compound_statement"
+            || child.kind() == "for_statement"
+            || child.kind() == "if_statement"
+            || child.kind() == "while_statement"
+            || child.kind() == "do_statement")
+            && body_declares_identifier(child, bytes, name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk a `declaration` node and check whether it declares a variable
+/// named `name`. Handles multi-declarator forms like `char *a, *b, *c;`
+/// where each declarator is a sibling of the type.
+fn declaration_declares_identifier(decl: Node, bytes: &[u8], name: &str) -> bool {
+    let mut cursor = decl.walk();
+    for child in decl.children(&mut cursor) {
+        match child.kind() {
+            "init_declarator" | "pointer_declarator" | "array_declarator" => {
+                if declarator_name(child, bytes) == Some(name) {
+                    return true;
+                }
+            }
+            "identifier" => {
+                let Ok(text) =
+                    std::str::from_utf8(&bytes[child.start_byte()..child.end_byte()])
+                else {
+                    continue;
+                };
+                if text == name {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The bound name of a declarator — the leaf identifier under any
+/// `pointer_declarator` / `array_declarator` / `init_declarator` chain.
+fn declarator_name<'a>(node: Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                return std::str::from_utf8(&bytes[child.start_byte()..child.end_byte()]).ok();
+            }
+            "pointer_declarator" | "array_declarator" | "init_declarator" => {
+                if let Some(s) = declarator_name(child, bytes) {
+                    return Some(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_likely_macro_name(name: &str) -> bool {
+    // Match SCREAMING_SNAKE_CASE / FOOBAR style: all uppercase letters,
+    // digits, or underscores, AND either contains an underscore or has
+    // at least two alphabetic characters. Single-letter caps like `F`,
+    // `M`, `S` are commonly user-defined globals — not macros.
+    let mut alpha = 0usize;
+    let mut has_underscore = false;
+    for c in name.chars() {
+        if c.is_ascii_alphabetic() {
+            if !c.is_ascii_uppercase() {
+                return false;
+            }
+            alpha += 1;
+        } else if c == '_' {
+            has_underscore = true;
+        } else if !c.is_ascii_digit() {
+            return false;
+        }
+    }
+    alpha >= 1 && (has_underscore || alpha >= 2)
+}
+
+fn call_to_i18n_wrapper(node: Node, bytes: &[u8]) -> bool {
+    if node.kind() != "call_expression" {
+        return false;
+    }
+    let Some(callee) = node.child(0) else {
+        return false;
+    };
+    if callee.kind() != "identifier" {
+        return false;
+    }
+    let Ok(name) = std::str::from_utf8(&bytes[callee.start_byte()..callee.end_byte()]) else {
+        return false;
+    };
+    I18N_WRAPPERS.contains(&name)
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +948,150 @@ fn check_legacy_kr_main(
     }
 }
 
+// ---------------------------------------------------------------------------
+// File-wide implicit-int / K&R style detection
+// ---------------------------------------------------------------------------
+//
+// `f(a){ ... }` with no return type is pre-ANSI C — it has been undefined
+// behaviour since C99. A *single* such function (typically `main`) is caught
+// by check_legacy_kr_main above. When *many* functions in the same file lack
+// a return type we have a much stronger signal: either pre-1989 source or
+// IOCCC-style obfuscation that abuses implicit-int to compress declarations.
+//
+// Tree-sitter recovers implicit-int functions in three observable shapes:
+//
+//   * P1 (clean):    `function_definition` whose declarator child is a
+//                    `parenthesized_declarator` rather than a
+//                    `function_declarator`. The "return-type" slot has been
+//                    filled by what is actually the function name parsed as a
+//                    `type_identifier`.
+//   * P2 (recovery): a top-level `expression_statement` containing a
+//                    `call_expression` (the bare `name(args)` signature),
+//                    followed by a `compound_statement` (the body).
+//   * P3 (recovery): a top-level `ERROR` node followed by a
+//                    `compound_statement` — the heaviest recovery, used when
+//                    the parser couldn't even partially split the signature.
+const IMPLICIT_INT_MIN_COUNT: usize = 3;
+
+fn check_implicit_int_functions(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut cursor = root.walk();
+    let children: Vec<Node> = root.children(&mut cursor).collect();
+    let mut hits: Vec<(usize, &str)> = Vec::new();
+    for (idx, child) in children.iter().enumerate() {
+        let kind = child.kind();
+        let matched_name: Option<&str> = match kind {
+            "function_definition" => {
+                if function_definition_is_implicit_int(*child) {
+                    // The "type_identifier" slot in this recovered shape is
+                    // actually the function name; the first plain identifier
+                    // would be a parameter.
+                    first_node_text_of_kind(*child, bytes, "type_identifier")
+                } else {
+                    None
+                }
+            }
+            "expression_statement" => {
+                if expression_statement_top_level_call(*child)
+                    && children
+                        .get(idx + 1)
+                        .map(|n| n.kind() == "compound_statement")
+                        .unwrap_or(false)
+                {
+                    first_node_text_of_kind(*child, bytes, "identifier")
+                } else {
+                    None
+                }
+            }
+            "ERROR" => {
+                if children
+                    .get(idx + 1)
+                    .map(|n| n.kind() == "compound_statement")
+                    .unwrap_or(false)
+                {
+                    // Either the ERROR has a recovered macro_type_specifier
+                    // (heavy recovery) or just a stray identifier.
+                    first_node_text_of_kind(*child, bytes, "identifier")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(name) = matched_name {
+            hits.push((child.start_byte(), name));
+        }
+    }
+    if hits.len() < IMPLICIT_INT_MIN_COUNT {
+        return;
+    }
+    let (first_offset, _first_name) = hits[0];
+    let (line, col) = index.locate(first_offset);
+    let sample: Vec<&str> = hits.iter().take(6).map(|(_, n)| *n).collect();
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: first_offset,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::ImplicitIntFunction,
+        severity: Severity::Warn,
+        confidence: 0.85,
+        message: format!(
+            "{} functions in this file lack an explicit return type (pre-ANSI K&R style; e.g. {})",
+            hits.len(),
+            sample.join(", ")
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, first_offset, 80)),
+        diff_introduced: false,
+    });
+}
+
+fn first_node_text_of_kind<'a>(node: Node<'a>, bytes: &'a [u8], kind: &str) -> Option<&'a str> {
+    if node.kind() == kind {
+        return std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).ok();
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(s) = first_node_text_of_kind(child, bytes, kind) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn function_definition_is_implicit_int(node: Node) -> bool {
+    let mut cursor = node.walk();
+    let kids: Vec<Node> = node.children(&mut cursor).collect();
+    // Implicit-int recovery: `f(a){...}` parses as
+    // type_identifier + parenthesized_declarator + compound_statement.
+    // A real definition has a function_declarator (or a pointer_declarator
+    // wrapping one) instead.
+    kids.iter().any(|n| n.kind() == "parenthesized_declarator")
+}
+
+fn expression_statement_top_level_call(node: Node) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "call_expression" {
+            // Require the callee to be a bare identifier — otherwise this is
+            // most likely a real expression statement, not a misparsed
+            // function signature.
+            if let Some(callee) = child.child(0) {
+                if callee.kind() == "identifier" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn expression_statement_calls_main(node: Node, bytes: &[u8]) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -1088,5 +1494,114 @@ main(int c,char *C[]) {
             "expected one finding, got {} in {:?}",
             hits, findings
         );
+    }
+
+    // --- file-wide implicit-int / K&R style detection ---
+
+    #[test]
+    fn implicit_int_three_functions_fires() {
+        // K&R-style implicit-int: parameters listed without types. This is
+        // what tree-sitter recovers as `parenthesized_declarator`, the
+        // pattern our detector keys off.
+        let src = b"Q(a){return a;}\nW(b){return b;}\nE(c){return c;}\n";
+        let findings = run(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::ImplicitIntFunction)
+            .expect("expected ImplicitIntFunction for 3+ implicit-int functions");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("3"));
+    }
+
+    #[test]
+    fn implicit_int_two_functions_does_not_fire() {
+        // Threshold is 3. K&R main alone is caught by LegacyKAndRMain.
+        let src = b"Q(a){return a;}\nmain(){}\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::ImplicitIntFunction));
+    }
+
+    #[test]
+    fn implicit_int_modern_c_does_not_fire() {
+        let src = b"int f(void) { return 0; }\nvoid g(void) {}\nstatic int h(int x) { return x; }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::ImplicitIntFunction));
+    }
+
+    // --- dynamic format string ---
+
+    #[test]
+    fn dynamic_format_string_global_format_fires() {
+        let src = b"const char *F = \"%c\";\nvoid emit(int c) { printf(F, c); }\n";
+        let findings = run(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicFormatString)
+            .expect("expected DynamicFormatString for global format var");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn dynamic_format_string_local_var_does_not_fire() {
+        // Local variable holding a literal — common pattern, suppress.
+        let src =
+            b"void f(int x) { const char *fmt = \"%d\"; printf(fmt, x); }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicFormatString));
+    }
+
+    #[test]
+    fn dynamic_format_string_parameter_does_not_fire() {
+        // Wrapper functions that forward a format-string parameter.
+        let src = b"void wrap(const char *fmt, int x) { printf(fmt, x); }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicFormatString));
+    }
+
+    #[test]
+    fn dynamic_format_string_v_family_does_not_fire() {
+        // v* family is excluded entirely — they exist to forward formats.
+        let src = b"#include <stdarg.h>\nvoid wrap(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vprintf(fmt, ap); va_end(ap); }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicFormatString));
+    }
+
+    #[test]
+    fn dynamic_format_string_macro_does_not_fire() {
+        // ALL_CAPS identifier is treated as a likely macro.
+        let src =
+            b"#define FMT \"%d\\n\"\nvoid f(int x) { printf(FMT, x); }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicFormatString));
+    }
+
+    #[test]
+    fn dynamic_format_string_i18n_wrapper_does_not_fire() {
+        let src = b"const char *_(const char *s);\nvoid f(int x) { printf(_(\"hello %d\"), x); }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicFormatString));
+    }
+
+    #[test]
+    fn dynamic_format_string_string_literal_does_not_fire() {
+        let src = b"void f(int x) { printf(\"%d\\n\", x); }\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicFormatString));
     }
 }

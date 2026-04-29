@@ -73,6 +73,9 @@ pub fn analyze(
     findings.extend(emit_format_string_write_findings(
         path, bytes, index, lang, &tokens,
     ));
+    findings.extend(emit_embedded_nul_findings(
+        path, bytes, index, lang, &tokens,
+    ));
     findings.extend(emit_decorative_whitespace_findings(
         path, bytes, index, lang, &tokens,
     ));
@@ -996,6 +999,155 @@ fn parse_define_loose(content: &str) -> Option<(&str, &str)> {
 // Bonsai-style obfuscation splits the directive across stringification:
 //   `#define N(a) "%"#a"$hhn"` — the literal `$hhn` appears alone.
 // We catch both the assembled directive and the orphan tail.
+
+// ---------------------------------------------------------------------------
+// Embedded NUL byte in string literal
+// ---------------------------------------------------------------------------
+//
+// A `\0` mid-string truncates the string for `strlen`-style libc functions
+// while leaving the bytes after it accessible by index. Used to smuggle
+// content past hex-dump style review or to confuse string-aware tooling.
+// We fire only when the NUL is followed by additional content before the
+// closing quote — a NUL at the very end is just an explicit terminator
+// (occasionally seen in legitimate C, e.g. `"foo\0"` to be exactly five
+// bytes when memcpy'd into a fixed buffer).
+
+fn emit_embedded_nul_findings(
+    path: &Path,
+    bytes: &[u8],
+    index: &LineIndex,
+    lang: Language,
+    tokens: &[Token],
+) -> Vec<Finding> {
+    if !matches!(lang, Language::C) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    for tok in tokens.iter().filter(|t| t.kind == TokenKind::StringLiteral) {
+        let content = &bytes[tok.content_start..tok.content_end];
+        let Some((nul_rel, after_rel)) = find_embedded_nul_with_trailing(content) else {
+            continue;
+        };
+        let abs_offset = tok.content_start + nul_rel;
+        let (line, col) = index.locate(abs_offset);
+        let trailing = (tok.content_end - tok.content_start).saturating_sub(after_rel);
+        findings.push(Finding {
+            path: path.to_path_buf(),
+            byte_offset: abs_offset,
+            line,
+            col,
+            pass: PassKind::Token,
+            kind: SignalKind::EmbeddedNulInString,
+            severity: Severity::Warn,
+            confidence: 0.85,
+            message: format!(
+                "string literal contains an embedded NUL followed by {} more bytes of source",
+                trailing
+            ),
+            snippet: crate::finding::redact_snippet(&snippet_around(bytes, tok.start, 80)),
+            diff_introduced: false,
+        });
+    }
+    findings
+}
+
+/// Scan the source bytes of a string literal's content (between the
+/// quotes) for a NUL escape that has more content after it. Returns the
+/// (relative_offset_of_nul_escape, relative_offset_immediately_after_nul).
+/// Recognises `\0`, `\00`, `\000`, `\x00`, `\x0`, `\X00` (case-insensitive),
+/// and ignores already-consumed escapes elsewhere.
+fn find_embedded_nul_with_trailing(content: &[u8]) -> Option<(usize, usize)> {
+    let n = content.len();
+    let mut i = 0;
+    while i < n {
+        let b = content[i];
+        if b != b'\\' {
+            i += 1;
+            continue;
+        }
+        let esc_start = i;
+        i += 1; // consume backslash
+        if i >= n {
+            break;
+        }
+        let next = content[i];
+        // Hex escape: \x00, \x0, \X00, \X0...
+        if next == b'x' || next == b'X' {
+            i += 1;
+            let hex_start = i;
+            while i < n && content[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            if i == hex_start {
+                continue;
+            }
+            let hex = &content[hex_start..i];
+            let all_zero = hex.iter().all(|c| *c == b'0');
+            if all_zero && content_after_has_payload(content, i) {
+                return Some((esc_start, i));
+            }
+            continue;
+        }
+        // Octal escape: \0, \00, \000 (1-3 octal digits)
+        if next.is_ascii_digit() && next < b'8' {
+            let oct_start = i;
+            let mut count = 0;
+            while i < n && count < 3 && content[i].is_ascii_digit() && content[i] < b'8' {
+                i += 1;
+                count += 1;
+            }
+            let oct = &content[oct_start..i];
+            let all_zero = oct.iter().all(|c| *c == b'0');
+            if all_zero && content_after_has_payload(content, i) {
+                return Some((esc_start, i));
+            }
+            continue;
+        }
+        // Other escape — `\n`, `\t`, `\\`, `\"`, etc. — consume one char.
+        i += 1;
+    }
+    None
+}
+
+/// True if any non-whitespace, non-NUL-escape byte remains in `content`
+/// starting at `from`. We tolerate trailing whitespace because some code
+/// pads with newlines/tabs after the NUL for layout, but any real payload
+/// trips the signal.
+fn content_after_has_payload(content: &[u8], from: usize) -> bool {
+    let mut i = from;
+    let n = content.len();
+    while i < n {
+        let b = content[i];
+        if b == b'\\' && i + 1 < n {
+            // Skip one escape sequence; if it's another all-zero NUL we
+            // count it as not-yet-payload but keep scanning past it.
+            let next = content[i + 1];
+            if next == b'x' || next == b'X' {
+                i += 2;
+                while i < n && content[i].is_ascii_hexdigit() {
+                    i += 1;
+                }
+                continue;
+            }
+            if next.is_ascii_digit() && next < b'8' {
+                i += 1;
+                let mut count = 0;
+                while i < n && count < 3 && content[i].is_ascii_digit() && content[i] < b'8' {
+                    i += 1;
+                    count += 1;
+                }
+                continue;
+            }
+            // Any other escape (\n, \t, \\, …) is real payload.
+            return true;
+        }
+        if !b.is_ascii_whitespace() {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
 fn emit_format_string_write_findings(
     path: &Path,
@@ -2262,6 +2414,73 @@ mod tests {
                 lang
             );
         }
+    }
+
+    // --- embedded NUL in string literal ---
+
+    fn run_embedded_nul(src: &[u8]) -> Vec<Finding> {
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, Language::C);
+        emit_embedded_nul_findings(&PathBuf::from("test.c"), src, &idx, Language::C, &tokens)
+    }
+
+    #[test]
+    fn embedded_nul_octal_with_trailing_fires() {
+        let src = b"const char s[] = \"abc\\0def\";\n";
+        let findings = run_embedded_nul(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::EmbeddedNulInString)
+            .expect("expected EmbeddedNulInString for `\\0` mid-string");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn embedded_nul_hex_with_trailing_fires() {
+        // `\x` consumes all subsequent hex digits in C, so `\x00g` ends the
+        // hex escape at `g` (not a hex digit). The escape decodes to NUL
+        // and `g!` is the trailing payload.
+        let src = b"const char s[] = \"abc\\x00g!\";\n";
+        let findings = run_embedded_nul(src);
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::EmbeddedNulInString));
+    }
+
+    #[test]
+    fn embedded_nul_at_end_does_not_fire() {
+        // Explicit NUL terminator is occasionally legitimate (e.g. fixed-size
+        // memcpy padding). Without trailing payload we don't fire.
+        let src = b"const char s[5] = \"abcd\\0\";\n";
+        let findings = run_embedded_nul(src);
+        assert!(
+            findings.is_empty(),
+            "trailing NUL alone should not fire: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn embedded_nul_skipped_for_non_c() {
+        let src = b"const s = \"abc\\0def\";\n";
+        let idx = LineIndex::new(src);
+        for lang in [Language::Python, Language::Rust, Language::JavaScript] {
+            let tokens = tokenize(src, lang);
+            let findings =
+                emit_embedded_nul_findings(&PathBuf::from("t"), src, &idx, lang, &tokens);
+            assert!(
+                findings.is_empty(),
+                "must only fire for C, fired for {:?}",
+                lang
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_nul_clean_string_does_not_fire() {
+        let src = b"const char s[] = \"hello world\";\n";
+        let findings = run_embedded_nul(src);
+        assert!(findings.is_empty());
     }
 
     #[test]

@@ -46,6 +46,9 @@ pub enum SignalKind {
     FormatStringWrite,
     LegacyKAndRMain,
     LineContinuationInCode,
+    ImplicitIntFunction,
+    DynamicFormatString,
+    EmbeddedNulInString,
 }
 
 impl SignalKind {
@@ -79,6 +82,9 @@ impl SignalKind {
             SignalKind::FormatStringWrite => "format-string-write",
             SignalKind::LegacyKAndRMain => "legacy-k-and-r-main",
             SignalKind::LineContinuationInCode => "line-continuation-in-code",
+            SignalKind::ImplicitIntFunction => "implicit-int-function",
+            SignalKind::DynamicFormatString => "dynamic-format-string",
+            SignalKind::EmbeddedNulInString => "embedded-nul-in-string",
         }
     }
 }

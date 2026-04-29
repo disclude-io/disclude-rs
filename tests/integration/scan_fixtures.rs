@@ -449,6 +449,51 @@ fn c_notation_fixture_emits_kr_main_decorative_and_line_continuation() {
 }
 
 #[test]
+fn c_magritte_fixture_emits_implicit_int_dynamic_format_and_embedded_nul() {
+    // IOCCC magritte.c packs three signals worth surfacing:
+    //   * 19 functions defined without an explicit return type
+    //   * `printf(F, ...)` with a global (non-literal) format string
+    //   * `"|\\/=_ \n](.\0(...)..."` — an embedded NUL with trailing payload
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("c/magritte.c"))
+        .expect("c/magritte.c fixture was scanned");
+
+    let implicit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::ImplicitIntFunction)
+        .expect("expected ImplicitIntFunction on magritte.c");
+    assert_eq!(implicit.severity, disclude::finding::Severity::Warn);
+    assert!(
+        implicit.message.contains("functions"),
+        "expected count-bearing message, got: {}",
+        implicit.message
+    );
+
+    let dyn_fmt = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicFormatString)
+        .expect("expected DynamicFormatString on magritte.c");
+    assert_eq!(dyn_fmt.severity, disclude::finding::Severity::Warn);
+    assert!(
+        dyn_fmt.message.contains("printf"),
+        "expected printf in message, got: {}",
+        dyn_fmt.message
+    );
+
+    let nul = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EmbeddedNulInString)
+        .expect("expected EmbeddedNulInString on magritte.c");
+    assert_eq!(nul.severity, disclude::finding::Severity::Warn);
+}
+
+#[test]
 fn c_defines_fixture_emits_macro_keyword_override_and_collision() {
     // IOCCC defines.c rebinds reserved C keywords via `#define` and packs
     // distinct identifiers that collapse to the same visual skeleton.
