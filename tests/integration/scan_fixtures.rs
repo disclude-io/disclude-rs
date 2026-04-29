@@ -1065,3 +1065,42 @@ fn bash_wget_exec_fixture_emits_dynamic_exec_critical() {
         hit.message
     );
 }
+
+#[test]
+fn bash_obfuscate_fixture_emits_single_critical_eval() {
+    // Output of the `bash-obfuscate` npm tool: the original script is split
+    // into fragments stored in short variables (Az, Bz, …), then reassembled
+    // and executed via `eval "$Az$Bz$Cz…"`. The only signal should be the
+    // CRITICAL DynamicExecution on the eval line; the variable assignments on
+    // the preceding line are individually benign and should not fire.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("bash/bash-obfuscate.sh")
+        })
+        .expect("bash/bash-obfuscate.sh fixture was scanned");
+
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution on bash/bash-obfuscate.sh");
+    assert!(
+        hit.message.contains("eval"),
+        "expected message to cite `eval`, got: {}",
+        hit.message
+    );
+    assert_eq!(
+        file.findings.len(),
+        1,
+        "expected exactly 1 finding (the eval), got: {:?}",
+        file.findings
+    );
+}
