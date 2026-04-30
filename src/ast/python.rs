@@ -218,7 +218,10 @@ fn emit_exec_like(
         (
             Severity::Critical,
             0.80,
-            format!("`{}` at module scope (runs on import) on a non-literal expression", fn_name),
+            format!(
+                "`{}` at module scope (runs on import) on a non-literal expression",
+                fn_name
+            ),
         )
     } else {
         (
@@ -537,9 +540,7 @@ fn is_dunder_name_main_check(cond: Node, bytes: &[u8]) -> bool {
             "string" => {
                 let mut sc = child.walk();
                 for inner in child.children(&mut sc) {
-                    if inner.kind() == "string_content"
-                        && node_text(inner, bytes) == "__main__"
-                    {
+                    if inner.kind() == "string_content" && node_text(inner, bytes) == "__main__" {
                         saw_main = true;
                     }
                 }
@@ -689,16 +690,7 @@ fn count_hex_escapes_in_content(content: Node, bytes: &[u8]) -> usize {
 // either alone is common enough to be noise.
 
 const DECODER_MODULES: &[&str] = &[
-    "base64",
-    "binascii",
-    "codecs",
-    "marshal",
-    "pickle",
-    "cPickle",
-    "zlib",
-    "gzip",
-    "lzma",
-    "bz2",
+    "base64", "binascii", "codecs", "marshal", "pickle", "cPickle", "zlib", "gzip", "lzma", "bz2",
 ];
 
 fn check_decoder_import_with_exec(
