@@ -186,6 +186,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::StringifyDereference,
     SignalKind::PayloadBytesLiteral,
     SignalKind::DecoderImportWithExec,
+    SignalKind::BuiltinsWrite,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -228,6 +229,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::StringifyDereference => "StringifyDereference",
         SignalKind::PayloadBytesLiteral => "PayloadBytesLiteral",
         SignalKind::DecoderImportWithExec => "DecoderImportWithExec",
+        SignalKind::BuiltinsWrite => "BuiltinsWrite",
     }
 }
 
@@ -303,6 +305,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::DecoderImportWithExec => {
             "Decoder module import co-occurs with exec/eval/compile (multi-stage payload shape)"
         }
+        SignalKind::BuiltinsWrite => {
+            "Direct write to the builtins namespace — patches a built-in for every importer"
+        }
     }
 }
 
@@ -313,7 +318,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::DynamicImport
         | SignalKind::BuildScriptShellout
         | SignalKind::NumericLiteralPayload
-        | SignalKind::FormatStringWrite => Severity::Critical,
+        | SignalKind::FormatStringWrite
+        | SignalKind::BuiltinsWrite => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

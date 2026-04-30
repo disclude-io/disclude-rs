@@ -70,6 +70,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
         match node.kind() {
             "call" => check_call(node, bytes, path, index, findings),
             "subscript" => check_subscript(node, bytes, path, index, findings),
+            "assignment" => check_assignment(node, bytes, path, index, findings),
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
@@ -120,6 +121,21 @@ fn check_call(
             if let Some(arg) = args.first() {
                 if arg.kind() == "identifier" && node_text(*arg, bytes) == "__file__" {
                     emit_self_read(node, bytes, path, index, findings);
+                }
+            }
+        }
+        Some("setattr") if func.kind() == "identifier" => {
+            // setattr(builtins, "name", value) patches the global namespace.
+            if let Some(obj_arg) = args.first() {
+                if obj_arg.kind() == "identifier" && node_text(*obj_arg, bytes) == "builtins" {
+                    emit_builtins_write(
+                        node,
+                        bytes,
+                        path,
+                        index,
+                        findings,
+                        "setattr(builtins, ...)",
+                    );
                 }
             }
         }
@@ -228,6 +244,68 @@ fn check_subscript(
         let base_name = base.as_deref().unwrap_or("dynamic");
         push_dynamic_attr(node, bytes, path, index, findings, base_name);
     }
+}
+
+fn check_assignment(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    // `builtins.<name> = <expr>` — direct write into the builtins namespace.
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    if left.kind() != "attribute" {
+        return;
+    }
+    let Some(obj) = left.child_by_field_name("object") else {
+        return;
+    };
+    if obj.kind() != "identifier" || node_text(obj, bytes) != "builtins" {
+        return;
+    }
+    let attr = left
+        .child_by_field_name("attribute")
+        .map(|n| node_text(n, bytes).to_string())
+        .unwrap_or_else(|| "?".to_string());
+    emit_builtins_write(
+        node,
+        bytes,
+        path,
+        index,
+        findings,
+        &format!("builtins.{} = ...", attr),
+    );
+}
+
+fn emit_builtins_write(
+    anchor: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+    label: &str,
+) {
+    let off = anchor.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::BuiltinsWrite,
+        severity: Severity::Critical,
+        confidence: 0.95,
+        message: format!(
+            "`{}` — patches a built-in for every importer of this module",
+            label
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
 }
 
 fn emit_exec_like(
@@ -1486,5 +1564,45 @@ mod tests {
         assert!(findings
             .iter()
             .all(|f| !(f.kind == SignalKind::DynamicExecution && f.message.contains("__file__"))));
+    }
+
+    // -----------------------------------------------------------------------
+    // builtins-write detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn builtins_attribute_assign_is_critical() {
+        let src = b"import builtins\nbuiltins.open = my_open\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::BuiltinsWrite)
+            .expect("expected BuiltinsWrite finding");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn setattr_builtins_is_critical() {
+        let src = b"import builtins\nsetattr(builtins, \"exec\", lambda c: None)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::BuiltinsWrite)
+            .expect("expected BuiltinsWrite finding");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn setattr_non_builtins_not_flagged() {
+        // setattr on an arbitrary object is not a builtins write.
+        let src = b"setattr(obj, \"name\", value)\n";
+        let findings = run(src);
+        assert!(findings.iter().all(|f| f.kind != SignalKind::BuiltinsWrite));
+    }
+
+    #[test]
+    fn builtins_read_not_flagged() {
+        // Reading from builtins (saving the original) is not itself a write.
+        let src = b"import builtins\n_orig = builtins.open\n";
+        let findings = run(src);
+        assert!(findings.iter().all(|f| f.kind != SignalKind::BuiltinsWrite));
     }
 }

@@ -56,6 +56,7 @@ pub enum SignalKind {
     StringifyDereference,
     PayloadBytesLiteral,
     DecoderImportWithExec,
+    BuiltinsWrite,
 }
 
 impl SignalKind {
@@ -99,6 +100,7 @@ impl SignalKind {
             SignalKind::StringifyDereference => "stringify-dereference",
             SignalKind::PayloadBytesLiteral => "payload-bytes-literal",
             SignalKind::DecoderImportWithExec => "decoder-import-with-exec",
+            SignalKind::BuiltinsWrite => "builtins-write",
         }
     }
 }
