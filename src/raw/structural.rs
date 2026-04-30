@@ -180,14 +180,14 @@ fn scan_mixed_indent(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
 // Narrow character-set file
 // ---------------------------------------------------------------------------
 //
-// JSFuck and similar esoteric-JS encodings use only 6 characters: `[]()!+`.
+// JSF*ck and similar esoteric-JS encodings use only 6 characters: `[]()!+`.
 // No legitimate source file (even minified) comes close to that restriction —
 // normal minified JS uses 30+ distinct printable characters. When the entire
 // printable-non-whitespace vocabulary of a file fits within a tiny set we have
 // a strong indicator of deliberate character-set-constrained obfuscation.
 
 /// Maximum distinct printable ASCII (0x21..=0x7e) characters for the signal
-/// to fire. JSFuck uses 6; a threshold of 12 gives comfortable headroom for
+/// to fire. JSF*ck uses 6; a threshold of 12 gives comfortable headroom for
 /// minor variants while staying far below any legitimate code.
 const NARROW_CHARSET_MAX_DISTINCT: usize = 12;
 
@@ -226,7 +226,7 @@ fn scan_narrow_charset(path: &Path, bytes: &[u8]) -> Vec<Finding> {
         severity: Severity::Warn,
         confidence: 0.90,
         message: format!(
-            "file uses only {} distinct printable characters ({:?}) — JSFuck-style or character-constrained obfuscation",
+            "file uses only {} distinct printable characters ({:?}) — JSF*ck-style or character-constrained obfuscation",
             distinct, chars
         ),
         snippet,
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn flags_jsfuck_style_narrow_charset() {
-        // 6-character JSFuck alphabet repeated to exceed the content threshold.
+        // 6-character JSF*ck alphabet repeated to exceed the content threshold.
         let src = b"[]()+!\n".repeat(40);
         let findings = run(&src);
         assert!(

@@ -922,7 +922,7 @@ fn ts_recruiter_attack_fixture_emits_base64_and_atob() {
 
 #[test]
 fn ts_jsfuck_fixture_emits_narrow_file_charset() {
-    // JSFuck encodes arbitrary JS using only 6 characters: `!()+[]`.
+    // JSF*ck encodes arbitrary JS using only 6 characters: `!()+[]`.
     // The narrow-file-charset signal must fire at Warn.
     let r = run();
     let file = r
