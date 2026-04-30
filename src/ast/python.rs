@@ -116,6 +116,13 @@ fn check_call(
                 emit_dynamic_import(node, *arg, bytes, path, index, findings);
             }
         }
+        Some("open") if func.kind() == "identifier" => {
+            if let Some(arg) = args.first() {
+                if arg.kind() == "identifier" && node_text(*arg, bytes) == "__file__" {
+                    emit_self_read(node, bytes, path, index, findings);
+                }
+            }
+        }
         // Some("getattr") | Some("setattr") | Some("hasattr") | Some("delattr") => {
         //     if let Some(arg) = args.get(1) {
         //         emit_dynamic_attr(
@@ -318,6 +325,30 @@ fn emit_dynamic_import(
         severity: Severity::Critical,
         confidence,
         message: "`__import__` called on a non-literal expression".to_string(),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+fn emit_self_read(
+    call_node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let off = call_node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::DynamicExecution,
+        severity: Severity::Warn,
+        confidence: 0.85,
+        message: "`open(__file__)` — file reads its own source, common pattern for extracting payloads hidden in comments".to_string(),
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
@@ -1029,7 +1060,7 @@ fn inspect_bytes_list_decode(
         return;
     }
 
-    let all_printable = int_values.iter().all(|&v| v >= 0x20 && v <= 0x7e);
+    let all_printable = int_values.iter().all(|&v| (0x20..=0x7e).contains(&v));
     let off = node.start_byte();
     let (line, col) = index.locate(off);
     let (severity, confidence) = if all_printable {
@@ -1432,5 +1463,28 @@ mod tests {
         assert!(findings
             .iter()
             .all(|f| f.kind != SignalKind::PayloadBytesLiteral));
+    }
+
+    // -----------------------------------------------------------------------
+    // open(__file__) self-read detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn open_dunder_file_warns() {
+        let src = b"with open(__file__, 'r') as f:\n    data = f.read()\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("__file__"))
+            .expect("expected DynamicExecution finding for open(__file__)");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn open_literal_path_is_not_flagged() {
+        let src = b"with open('config.txt', 'r') as f:\n    data = f.read()\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| !(f.kind == SignalKind::DynamicExecution && f.message.contains("__file__"))));
     }
 }
