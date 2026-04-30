@@ -54,6 +54,8 @@ pub enum SignalKind {
     ReverseSubscriptNotation,
     RecursiveMainCall,
     StringifyDereference,
+    PayloadBytesLiteral,
+    DecoderImportWithExec,
 }
 
 impl SignalKind {
@@ -95,6 +97,8 @@ impl SignalKind {
             SignalKind::ReverseSubscriptNotation => "reverse-subscript-notation",
             SignalKind::RecursiveMainCall => "recursive-main-call",
             SignalKind::StringifyDereference => "stringify-dereference",
+            SignalKind::PayloadBytesLiteral => "payload-bytes-literal",
+            SignalKind::DecoderImportWithExec => "decoder-import-with-exec",
         }
     }
 }

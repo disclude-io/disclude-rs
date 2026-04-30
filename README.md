@@ -148,9 +148,11 @@ AST pass; tree-sitter.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `dynamic-execution` | critical / warn | `exec()` or `eval()` called with a non-literal argument (critical), or with a literal (warn). Also fires when `compile()` is reached by a decoded value. |
+| `dynamic-execution` | critical / warn | `exec()`, `eval()`, or `compile()` called on a non-literal value. Critical when the argument is reached via a decoder/decompressor (`base64.b64decode`, `zlib.decompress`, `codecs.decode`, …), is a runtime-concatenated string, or sits at module scope (runs on import); warn otherwise. The `re.compile(...)` library call is excluded — only the bare builtin counts. |
 | `dynamic-import` | warn | `__import__()` or `importlib.import_module()` called with a non-literal specifier. |
 | `dynamic-attribute` | warn | `getattr(obj, name)` where `name` is not a string literal — runtime-resolved attribute lookup. |
+| `payload-bytes-literal` | warn | A `b"..."` / `b'...'` literal whose content is dominated by `\xNN` escapes (≥32 escapes AND ≥30% of content). Real bytes literals are short and purposeful; a long, hex-dense literal is the shape of a compressed/encrypted code blob waiting to be unpacked. |
+| `decoder-import-with-exec` | warn | The file imports a decoder/decompressor module (`base64`, `binascii`, `codecs`, `marshal`, `pickle`, `zlib`, `gzip`, `lzma`, `bz2`) AND calls the bare `exec`/`eval`/`compile` builtin. The combination is the multi-stage payload shape: blob → decode → run. Either piece alone is benign; together they are suspicious. |
 
 ### Dynamic execution — TypeScript / JavaScript
 

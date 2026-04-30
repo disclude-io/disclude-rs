@@ -184,6 +184,8 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::ReverseSubscriptNotation,
     SignalKind::RecursiveMainCall,
     SignalKind::StringifyDereference,
+    SignalKind::PayloadBytesLiteral,
+    SignalKind::DecoderImportWithExec,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -224,6 +226,8 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::ReverseSubscriptNotation => "ReverseSubscriptNotation",
         SignalKind::RecursiveMainCall => "RecursiveMainCall",
         SignalKind::StringifyDereference => "StringifyDereference",
+        SignalKind::PayloadBytesLiteral => "PayloadBytesLiteral",
+        SignalKind::DecoderImportWithExec => "DecoderImportWithExec",
     }
 }
 
@@ -292,6 +296,12 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::RecursiveMainCall => "main() is called from within a function in this TU",
         SignalKind::StringifyDereference => {
             "`*#param` pattern in a #define body — stringify-then-dereference"
+        }
+        SignalKind::PayloadBytesLiteral => {
+            "Bytes literal is dominated by `\\xNN` escapes (binary payload shape)"
+        }
+        SignalKind::DecoderImportWithExec => {
+            "Decoder module import co-occurs with exec/eval/compile (multi-stage payload shape)"
         }
     }
 }

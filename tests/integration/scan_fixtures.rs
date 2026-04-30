@@ -539,6 +539,67 @@ fn c_rational_fixture_emits_reverse_subscript_recursive_main_and_stringify() {
 }
 
 #[test]
+fn python_multi_stage_fixture_emits_three_signals() {
+    // multi_stage.py is a malware-shape Python module:
+    //   * a 33-escape `b"..."` payload literal
+    //   * imports of zlib + base64 + codecs (decoder modules)
+    //   * a top-level `exec(...)` chain that runs on import
+    // We expect: payload-bytes-literal (warn), decoder-import-with-exec
+    // (warn), and the dynamic-execution finding elevated to CRITICAL because
+    // the call sits at module scope.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("python/multi_stage.py"))
+        .expect("python/multi_stage.py fixture was scanned");
+
+    let payload = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::PayloadBytesLiteral)
+        .expect("expected PayloadBytesLiteral on multi_stage.py");
+    assert_eq!(payload.severity, disclude::finding::Severity::Warn);
+    assert!(
+        payload.message.contains("\\xNN"),
+        "unexpected message: {}",
+        payload.message
+    );
+
+    let dec = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DecoderImportWithExec)
+        .expect("expected DecoderImportWithExec on multi_stage.py");
+    assert_eq!(dec.severity, disclude::finding::Severity::Warn);
+    for module in ["base64", "zlib", "codecs"] {
+        assert!(
+            dec.message.contains(module),
+            "expected `{}` cited in decoder-import-with-exec message, got: {}",
+            module,
+            dec.message
+        );
+    }
+
+    let dynx = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution)
+        .expect("expected DynamicExecution on multi_stage.py");
+    assert_eq!(
+        dynx.severity,
+        disclude::finding::Severity::Critical,
+        "module-scope exec must elevate to CRITICAL, got: {:?}",
+        dynx
+    );
+    assert!(
+        dynx.message.contains("module scope"),
+        "expected module-scope wording in message, got: {}",
+        dynx.message
+    );
+}
+
+#[test]
 fn c_defines_fixture_emits_macro_keyword_override_and_collision() {
     // IOCCC defines.c rebinds reserved C keywords via `#define` and packs
     // distinct identifiers that collapse to the same visual skeleton.
@@ -770,13 +831,14 @@ fn base64_eval_compile_fixture_emits_expected_findings() {
         "expected a finding citing `compile`"
     );
 
-    // Full finding set: no other kinds should fire on this fixture. In
-    // particular, the short b64-looking strings (`cHJpbnQ`, `bVxuyoT`, ...)
-    // are below the base64 detector's 64-char threshold and must not trigger.
+    // Full finding set: 2 EncodingEscapeSoup + 2 DynamicExecution +
+    // 1 DecoderImportWithExec = 5 total. Short b64-looking strings
+    // (`cHJpbnQ`, `bVxuyoT`, ...) are below the base64 detector's 64-char
+    // threshold and must not trigger.
     assert_eq!(
         file.findings.len(),
-        4,
-        "expected exactly 4 findings, got: {:?}",
+        5,
+        "expected exactly 5 findings, got: {:?}",
         file.findings
     );
     assert!(
@@ -785,6 +847,14 @@ fn base64_eval_compile_fixture_emits_expected_findings() {
             .iter()
             .any(|f| f.kind == SignalKind::EncodingBase64),
         "short base64-like literals must not trigger the base64 detector"
+    );
+    assert_eq!(
+        file.findings
+            .iter()
+            .filter(|f| f.kind == SignalKind::DecoderImportWithExec)
+            .count(),
+        1,
+        "expected one decoder-import-with-exec finding (base64 + codecs imported, eval/compile present)"
     );
 }
 
