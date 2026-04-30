@@ -138,14 +138,56 @@ fn check_call(
     // `subscript` with a `value` field that is the base expression and a
     // `subscript` field that is the index.
     if let Some(name) = qualified.as_deref() {
-        if matches!(name, "globals.get" | "vars.get" | "locals.get") {
-            if let Some(arg) = args.first() {
-                if !is_literal_expression(*arg, bytes) {
-                    push_dynamic_attr(node, bytes, path, index, findings, name);
+        match name {
+            "marshal.loads" | "marshal.load" => {
+                if let Some(arg) = args.first() {
+                    emit_marshal_loads(node, *arg, bytes, path, index, findings, name);
                 }
             }
+            "globals.get" | "vars.get" | "locals.get" => {
+                if let Some(arg) = args.first() {
+                    if !is_literal_expression(*arg, bytes) {
+                        push_dynamic_attr(node, bytes, path, index, findings, name);
+                    }
+                }
+            }
+            _ => {}
         }
     }
+}
+
+fn emit_marshal_loads(
+    call_node: Node,
+    arg: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+    fn_name: &str,
+) {
+    // Higher confidence when the argument is a literal bytes blob — the
+    // bytecode is embedded statically in the source. Lower (but still
+    // meaningful) when it's a variable, since we can't rule out a file-read.
+    let on_literal = matches!(arg.kind(), "string" | "concatenated_string");
+    let confidence = if on_literal { 0.90 } else { 0.75 };
+    let off = call_node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::DynamicExecution,
+        severity: Severity::Warn,
+        confidence,
+        message: format!(
+            "`{}` deserializes Python bytecode from bytes — code-object sink",
+            fn_name
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
 }
 
 // Subscript-form reach-by-name detection is handled in a separate visitor
@@ -469,9 +511,16 @@ fn looks_decoded(node: Node, bytes: &[u8]) -> bool {
                     return true;
                 }
             }
-            // `codecs.decode(x, "base64")` — also decoder-shaped.
+            // `codecs.decode(x, "base64")` / `marshal.loads(x)` / `pickle.loads(x)` —
+            // qualified decoder/code-object calls.
             if let Some(qual) = callee_qualified_name(func, bytes) {
-                if qual.starts_with("codecs.") || qual.ends_with(".decode") {
+                if qual.starts_with("codecs.")
+                    || qual.ends_with(".decode")
+                    || matches!(
+                        qual.as_str(),
+                        "marshal.loads" | "marshal.load" | "pickle.loads" | "pickle.load"
+                    )
+                {
                     return true;
                 }
             }
@@ -576,8 +625,14 @@ fn check_payload_bytes_literals(
 ) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if node.kind() == "string" && string_node_is_bytes(node, bytes) {
-            inspect_bytes_literal(node, bytes, path, index, findings);
+        match node.kind() {
+            "string" if string_node_is_bytes(node, bytes) => {
+                inspect_bytes_literal(node, bytes, path, index, findings);
+            }
+            "concatenated_string" => {
+                inspect_concatenated_bytes_literal(node, bytes, path, index, findings);
+            }
+            _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
             if let Some(child) = node.child(i) {
@@ -585,6 +640,59 @@ fn check_payload_bytes_literals(
             }
         }
     }
+}
+
+// Aggregate escape counts across all bytes-string chunks in a `b'...' b'...'`
+// concatenated literal. Splitting a blob across several adjacent strings is a
+// common way to stay under per-chunk thresholds.
+fn inspect_concatenated_bytes_literal(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut total_content_len = 0usize;
+    let mut total_escape_count = 0usize;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "string" && string_node_is_bytes(child, bytes) {
+            let mut sc = child.walk();
+            for content in child.children(&mut sc) {
+                if content.kind() == "string_content" {
+                    let span = &bytes[content.start_byte()..content.end_byte()];
+                    total_content_len += span.len();
+                    total_escape_count += count_hex_escapes_in_content(content, bytes);
+                }
+            }
+        }
+    }
+    if total_escape_count < PAYLOAD_BYTES_MIN_ESCAPES || total_content_len == 0 {
+        return;
+    }
+    let ratio = (total_escape_count * 4) as f32 / total_content_len as f32;
+    if ratio < PAYLOAD_BYTES_MIN_RATIO {
+        return;
+    }
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::PayloadBytesLiteral,
+        severity: Severity::Warn,
+        confidence: 0.85,
+        message: format!(
+            "concatenated bytes literal contains {} `\\xNN` escapes ({:.0}% of content) — binary payload shape",
+            total_escape_count,
+            ratio * 100.0
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
 }
 
 fn string_node_is_bytes(node: Node, bytes: &[u8]) -> bool {
@@ -1244,5 +1352,85 @@ mod tests {
         assert!(findings
             .iter()
             .all(|f| f.kind != SignalKind::NumericLiteralPayload));
+    }
+
+    // -----------------------------------------------------------------------
+    // marshal.loads detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn marshal_loads_on_literal_warns() {
+        let src = b"import marshal\ncode_obj = marshal.loads(b'\\xe3\\x00\\x00')\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("marshal"))
+            .expect("expected DynamicExecution finding for marshal.loads");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.confidence >= 0.89);
+    }
+
+    #[test]
+    fn marshal_loads_on_variable_warns() {
+        let src = b"import marshal\ncode_obj = marshal.loads(raw)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("marshal"))
+            .expect("expected DynamicExecution finding for marshal.loads");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn exec_of_marshal_loads_is_decoded() {
+        // Inline `exec(marshal.loads(blob))` should be recognized as exec on a
+        // decoded value (CRITICAL), not just a generic non-literal.
+        let src = b"import marshal\nexec(marshal.loads(blob))\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Critical)
+            .expect("expected CRITICAL DynamicExecution");
+        assert!(hit.message.contains("decoded"));
+    }
+
+    // -----------------------------------------------------------------------
+    // concatenated bytes literal aggregate threshold
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concatenated_bytes_aggregate_fires() {
+        // Four chunks of ~10 escapes each — each below the 32-escape minimum
+        // individually, but the aggregate (40) crosses it.
+        let mut src = String::new();
+        src.push_str("blob = (\n");
+        for _ in 0..4 {
+            src.push_str("    b\"");
+            for i in 0u8..10 {
+                src.push_str(&format!("\\x{:02x}", i));
+            }
+            src.push_str("\"\n");
+        }
+        src.push_str(")\n");
+        let findings = run(src.as_bytes());
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::PayloadBytesLiteral));
+    }
+
+    #[test]
+    fn concatenated_bytes_below_aggregate_threshold_is_ignored() {
+        // Two chunks of 8 escapes each — aggregate 16, below threshold.
+        let mut src = String::new();
+        src.push_str("blob = (\n");
+        for _ in 0..2 {
+            src.push_str("    b\"");
+            for i in 0u8..8 {
+                src.push_str(&format!("\\x{:02x}", i));
+            }
+            src.push_str("\"\n");
+        }
+        src.push_str(")\n");
+        let findings = run(src.as_bytes());
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::PayloadBytesLiteral));
     }
 }

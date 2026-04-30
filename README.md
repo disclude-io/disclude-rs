@@ -2,7 +2,7 @@
 
 Scan a (C, Rust, Python, TypeScript, Bash/Shell) source tree for signs that code is hiding its intent, including Unicode attacks, encoded payloads, dynamic execution patterns, and build-time escape hatches. This is not a general purpose vulnerability scanner. This is a tool to surface the techniques used to make malicious code look benign on review.
 
-Implemented in fast, multi-threaded Rust. Useful for humans, useful for AI agents: find areas for examination faster (and cheaper) than full code scans.
+The static analyzer is implemented in fast, multi-threaded Rust, and employs three views of the code: as raw strings, as custom tokens, and as a full abstract syntax tree. Useful for humans, and useful for AI agents: find areas for examination faster (and cheaper) than full code scans.
 
 ## Install
 
