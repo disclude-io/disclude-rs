@@ -56,6 +56,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     walk(root, bytes, path, &index, &mut findings);
     check_payload_bytes_literals(root, bytes, path, &index, &mut findings);
     check_decoder_import_with_exec(root, bytes, path, &index, &mut findings);
+    check_obfuscated_byte_strings(root, bytes, path, &index, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -839,6 +840,114 @@ fn push_decoder_unique(name: &str, out: &mut Vec<&'static str>) {
 }
 
 // ---------------------------------------------------------------------------
+// Obfuscated-byte-string detector
+// ---------------------------------------------------------------------------
+//
+// `bytes([119, 104, 111, 97, 109, 105]).decode()` constructs the string
+// "whoami" without it appearing as a literal anywhere. Real code would just
+// write the string. The only purpose of this form is to hide the value from
+// grep / static analysis. When all integers fall in the printable-ASCII range
+// the string is clearly human-readable text being hidden, which is CRITICAL;
+// otherwise we emit WARN (could be constructing binary data, though still
+// suspicious in most contexts).
+
+fn check_obfuscated_byte_strings(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "call" {
+            inspect_bytes_list_decode(node, bytes, path, index, findings);
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+/// Returns the `list` node inside `bytes([...]).decode()`, or `None` if the
+/// call doesn't match that pattern.
+fn bytes_list_decode_list<'a>(node: Node<'a>, bytes: &[u8]) -> Option<Node<'a>> {
+    let func = node
+        .child_by_field_name("function")
+        .filter(|n| n.kind() == "attribute")?;
+    func.child_by_field_name("attribute")
+        .filter(|n| node_text(*n, bytes) == "decode")?;
+    let obj = func
+        .child_by_field_name("object")
+        .filter(|n| n.kind() == "call")?;
+    obj.child_by_field_name("function")
+        .filter(|n| node_text(*n, bytes) == "bytes")?;
+    let inner_args = obj.child_by_field_name("arguments")?;
+    let &list_node = positional_args(inner_args).first()?;
+    (list_node.kind() == "list").then_some(list_node)
+}
+
+fn inspect_bytes_list_decode(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(list_node) = bytes_list_decode_list(node, bytes) else {
+        return;
+    };
+
+    // Collect integer element values.
+    let mut int_values: Vec<u32> = Vec::new();
+    let mut cursor = list_node.walk();
+    for child in list_node.children(&mut cursor) {
+        match child.kind() {
+            "[" | "]" | "," => {}
+            "integer" => {
+                let s = node_text(child, bytes);
+                if let Ok(v) = s.parse::<u32>() {
+                    int_values.push(v);
+                } else {
+                    return; // not a plain decimal integer — bail
+                }
+            }
+            _ => return, // non-integer element — bail
+        }
+    }
+    if int_values.is_empty() {
+        return;
+    }
+
+    let all_printable = int_values.iter().all(|&v| v >= 0x20 && v <= 0x7e);
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    let (severity, confidence) = if all_printable {
+        (Severity::Critical, 0.90)
+    } else {
+        (Severity::Warn, 0.75)
+    };
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::NumericLiteralPayload,
+        severity,
+        confidence,
+        message: format!(
+            "`bytes([...]).decode()` constructs a string from {} integer literals — numeric string obfuscation",
+            int_values.len()
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1090,5 +1199,50 @@ mod tests {
         assert!(findings
             .iter()
             .all(|f| f.kind != SignalKind::DynamicExecution));
+    }
+
+    // -----------------------------------------------------------------------
+    // obfuscated-byte-string detector
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bytes_list_decode_printable_ascii_is_critical() {
+        // bytes([119, 104, 111, 97, 109, 105]).decode() == "whoami"
+        let src = b"s = bytes([119, 104, 111, 97, 109, 105]).decode()\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::NumericLiteralPayload)
+            .expect("expected NumericLiteralPayload finding");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn bytes_list_decode_non_printable_is_warn() {
+        // Contains values outside printable ASCII — WARN, not CRITICAL.
+        let src = b"s = bytes([0, 1, 2, 3, 4, 5]).decode()\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::NumericLiteralPayload)
+            .expect("expected NumericLiteralPayload finding");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn bytes_list_decode_empty_list_is_ignored() {
+        let src = b"s = bytes([]).decode()\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::NumericLiteralPayload));
+    }
+
+    #[test]
+    fn plain_decode_without_bytes_list_not_flagged() {
+        // `b"hello".decode()` is a plain bytes literal, not obfuscated.
+        let src = b"s = b\"hello\".decode()\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::NumericLiteralPayload));
     }
 }
