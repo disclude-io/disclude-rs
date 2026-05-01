@@ -64,8 +64,17 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
     };
     let index = LineIndex::new(bytes);
     let tag_deobfuscators = collect_tag_deobfuscators(root, bytes);
+    let data_uri_vars = collect_data_uri_vars(root, bytes);
     let mut findings = Vec::new();
-    walk(root, bytes, path, &index, &tag_deobfuscators, &mut findings);
+    walk(
+        root,
+        bytes,
+        path,
+        &index,
+        &tag_deobfuscators,
+        &data_uri_vars,
+        &mut findings,
+    );
     AstOutcome {
         findings,
         parse_error,
@@ -79,12 +88,21 @@ fn walk(
     path: &Path,
     index: &LineIndex,
     tag_deobfuscators: &HashSet<String>,
+    data_uri_vars: &HashSet<String>,
     findings: &mut Vec<Finding>,
 ) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         match node.kind() {
-            "call_expression" => check_call(node, bytes, path, index, tag_deobfuscators, findings),
+            "call_expression" => check_call(
+                node,
+                bytes,
+                path,
+                index,
+                tag_deobfuscators,
+                data_uri_vars,
+                findings,
+            ),
             "new_expression" => check_new(node, bytes, path, index, findings),
             _ => {}
         }
@@ -106,6 +124,7 @@ fn check_call(
     path: &Path,
     index: &LineIndex,
     tag_deobfuscators: &HashSet<String>,
+    data_uri_vars: &HashSet<String>,
     findings: &mut Vec<Finding>,
 ) {
     let Some(func) = call_function(node) else {
@@ -146,7 +165,29 @@ fn check_call(
     // Dynamic `import(x)` — the callee is an `import` keyword node.
     if func.kind() == "import" {
         if let Some(first) = positional.first() {
-            if !is_literal_expression(*first) {
+            // `import("data:text/javascript;base64,...")` — and the
+            // template-literal `\`data:...${x}\`` shape — execute arbitrary
+            // code without ever touching disk. No legitimate use in app
+            // or library code; emit a sharper signal in place of the
+            // generic dynamic-import warn. Also flag the indirect form
+            // `const m = \`data:...\`; await import(m);` by resolving the
+            // identifier through the file's variable initializers.
+            let arg_is_data_uri = specifier_starts_with_data_uri(*first, bytes)
+                || (first.kind() == "identifier"
+                    && data_uri_vars.contains(node_text(*first, bytes)));
+            if arg_is_data_uri {
+                push(
+                    findings,
+                    node,
+                    bytes,
+                    path,
+                    index,
+                    SignalKind::DataUriImport,
+                    Severity::Critical,
+                    0.95,
+                    "`import(...)` specifier is a `data:` URI — executes arbitrary code without touching disk".into(),
+                );
+            } else if !is_literal_expression(*first) {
                 push(
                     findings,
                     node,
@@ -491,6 +532,46 @@ fn is_literal_expression(node: Node) -> bool {
     }
 }
 
+/// Returns true if `node` is a string literal whose content begins with
+/// `data:`, or a template literal whose first literal segment begins with
+/// `data:`. This is the shape `import("data:text/javascript;base64,...")` /
+/// `` import(`data:...${x}`) `` — a JS module loaded from an inline data
+/// URI, which executes arbitrary code without ever touching disk.
+fn specifier_starts_with_data_uri(node: Node, bytes: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"data:";
+    match node.kind() {
+        "string" => {
+            // Children are quote, string_fragment*, quote. Check the
+            // first string_fragment.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "string_fragment" {
+                    return bytes
+                        .get(child.start_byte()..child.end_byte())
+                        .is_some_and(|s| s.starts_with(PREFIX));
+                }
+            }
+            false
+        }
+        "template_string" => {
+            // Children: backtick, string_fragment*, template_substitution*,
+            // backtick. The first string_fragment carries the literal
+            // prefix; if it starts with `data:`, the import begins inside
+            // a data URI regardless of what `${...}` interpolates.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "string_fragment" {
+                    return bytes
+                        .get(child.start_byte()..child.end_byte())
+                        .is_some_and(|s| s.starts_with(PREFIX));
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn template_has_substitution(node: Node) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -590,6 +671,34 @@ fn push(
 //
 // We collect such function names in a single pre-pass, then the main walk
 // flags any tagged-template call whose tag identifier is in the set.
+
+/// Collect variable names whose initializer is a string or template
+/// literal beginning with `data:`. Used to resolve the indirect shape
+/// `const m = \`data:...\`; await import(m);` — the call site sees only
+/// the identifier, but the initializer pins the value's prefix.
+fn collect_data_uri_vars(root: Node, bytes: &[u8]) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "variable_declarator" {
+            if let (Some(name_node), Some(value)) = (
+                node.child_by_field_name("name"),
+                node.child_by_field_name("value"),
+            ) {
+                if name_node.kind() == "identifier" && specifier_starts_with_data_uri(value, bytes)
+                {
+                    names.insert(node_text(name_node, bytes).to_string());
+                }
+            }
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+    names
+}
 
 fn collect_tag_deobfuscators(root: Node, bytes: &[u8]) -> HashSet<String> {
     let mut names: HashSet<String> = HashSet::new();
@@ -1041,6 +1150,57 @@ mod tests {
         assert!(f
             .iter()
             .all(|x| x.kind != SignalKind::TagFunctionDeobfuscator));
+    }
+
+    #[test]
+    fn import_string_data_uri_is_critical() {
+        let f = run(b"await import(\"data:text/javascript;base64,YWxlcnQoMSk=\");");
+        let hit = f
+            .iter()
+            .find(|x| x.kind == SignalKind::DataUriImport)
+            .expect("expected DataUriImport");
+        assert_eq!(hit.severity, Severity::Critical);
+        // The generic dynamic-import warn must not double-fire on the same call.
+        assert!(f.iter().all(|x| x.kind != SignalKind::DynamicImport));
+    }
+
+    #[test]
+    fn import_template_data_uri_is_critical() {
+        let f = run(b"await import(`data:text/javascript;base64,${blob}`);");
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::DataUriImport && x.severity == Severity::Critical));
+        assert!(f.iter().all(|x| x.kind != SignalKind::DynamicImport));
+    }
+
+    #[test]
+    fn import_indirect_data_uri_via_const_is_critical() {
+        let src = b"const spec = `data:text/javascript;base64,${b}`;\n\
+                    await import(spec);\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::DataUriImport && x.severity == Severity::Critical));
+        assert!(f.iter().all(|x| x.kind != SignalKind::DynamicImport));
+    }
+
+    #[test]
+    fn import_non_data_uri_string_is_ignored_for_data_uri() {
+        // Static specifier — neither dynamic-import nor data-uri-import.
+        let f = run(b"await import(\"./mod\");");
+        assert!(f.iter().all(|x| x.kind != SignalKind::DataUriImport));
+        assert!(f.iter().all(|x| x.kind != SignalKind::DynamicImport));
+    }
+
+    #[test]
+    fn import_dynamic_non_data_uri_stays_warn() {
+        // Indirect import of a regular path — the existing dynamic-import
+        // warn must still fire; data-uri-import must not.
+        let f = run(b"await import(name);");
+        assert!(f.iter().all(|x| x.kind != SignalKind::DataUriImport));
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::DynamicImport && x.severity == Severity::Warn));
     }
 
     #[test]

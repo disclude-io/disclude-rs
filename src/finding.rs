@@ -60,6 +60,7 @@ pub enum SignalKind {
     FrameIntrospection,
     ProxyGlobalHijack,
     TagFunctionDeobfuscator,
+    DataUriImport,
 }
 
 impl SignalKind {
@@ -107,6 +108,7 @@ impl SignalKind {
             SignalKind::FrameIntrospection => "frame-introspection",
             SignalKind::ProxyGlobalHijack => "proxy-global-hijack",
             SignalKind::TagFunctionDeobfuscator => "tag-function-deobfuscator",
+            SignalKind::DataUriImport => "data-uri-import",
         }
     }
 }

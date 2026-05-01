@@ -190,6 +190,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::FrameIntrospection,
     SignalKind::ProxyGlobalHijack,
     SignalKind::TagFunctionDeobfuscator,
+    SignalKind::DataUriImport,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -236,6 +237,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::FrameIntrospection => "FrameIntrospection",
         SignalKind::ProxyGlobalHijack => "ProxyGlobalHijack",
         SignalKind::TagFunctionDeobfuscator => "TagFunctionDeobfuscator",
+        SignalKind::DataUriImport => "DataUriImport",
     }
 }
 
@@ -323,6 +325,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::TagFunctionDeobfuscator => {
             "Tagged-template tag function decodes its template strings (reverse / atob / fromCharCode)"
         }
+        SignalKind::DataUriImport => {
+            "`import()` specifier is a `data:` URI — executes arbitrary code without touching disk"
+        }
     }
 }
 
@@ -336,7 +341,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::FormatStringWrite
         | SignalKind::BuiltinsWrite
         | SignalKind::ProxyGlobalHijack
-        | SignalKind::TagFunctionDeobfuscator => Severity::Critical,
+        | SignalKind::TagFunctionDeobfuscator
+        | SignalKind::DataUriImport => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

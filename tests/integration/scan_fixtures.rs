@@ -707,6 +707,40 @@ fn typescript_proxy_gate_fixture_emits_proxy_global_hijack() {
 }
 
 #[test]
+fn typescript_dynamic_import_fixture_emits_data_uri_import_critical() {
+    // dynamic_import.ts builds a `data:text/javascript;base64,${...}`
+    // template into a `const`, then calls `import(spec)`. Detection must
+    // resolve the identifier through the variable initializer and flip
+    // the generic dynamic-import warn to data-uri-import critical.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/dynamic_import.ts")
+        })
+        .expect("typescript/dynamic_import.ts fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DataUriImport)
+        .expect("expected DataUriImport on dynamic_import.ts");
+    assert_eq!(hit.severity, disclude::finding::Severity::Critical);
+    assert_eq!(hit.line, 6);
+    // The sharper signal replaces the generic dynamic-import warn —
+    // this fixture must not double-emit both.
+    assert!(
+        file.findings
+            .iter()
+            .all(|f| f.kind != SignalKind::DynamicImport),
+        "expected dynamic-import to NOT also fire when data-uri-import does, got: {:?}",
+        file.findings
+    );
+}
+
+#[test]
 fn typescript_template_fixture_emits_tag_function_deobfuscator() {
     // template.ts defines a tag function `r` that reverses each
     // template-string segment, then uses `` r`...` `` to materialize the
