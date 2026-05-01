@@ -707,6 +707,45 @@ fn typescript_proxy_gate_fixture_emits_proxy_global_hijack() {
 }
 
 #[test]
+fn typescript_intl_fixture_surfaces_payload_via_existing_detectors() {
+    // intl.ts demonstrates the "stash a payload in a free-form Intl
+    // string field" pattern (timeZone, locale tags, etc.). The receiver
+    // looks innocuous — `Intl.DateTimeFormat`, `Intl.NumberFormat` — but
+    // the string handed in is the real cargo. The point of pinning this
+    // fixture is to confirm that payload-shape detectors fire regardless
+    // of which API wraps the literal: they key off the string bytes, not
+    // the call surface.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("typescript/intl.ts"))
+        .expect("typescript/intl.ts fixture was scanned");
+
+    let b64 = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncodingBase64)
+        .expect("expected EncodingBase64 on the timeZone payload");
+    assert_eq!(b64.severity, disclude::finding::Severity::Warn);
+    assert_eq!(
+        b64.line, 15,
+        "base64 payload should anchor on the timeZone literal"
+    );
+
+    let soup = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncodingEscapeSoup)
+        .expect("expected EncodingEscapeSoup on the hex locale literal");
+    assert_eq!(soup.severity, disclude::finding::Severity::Warn);
+    assert_eq!(
+        soup.line, 22,
+        "hex-escape soup should anchor on the locale literal"
+    );
+}
+
+#[test]
 fn typescript_dynamic_import_fixture_emits_data_uri_import_critical() {
     // dynamic_import.ts builds a `data:text/javascript;base64,${...}`
     // template into a `const`, then calls `import(spec)`. Detection must
