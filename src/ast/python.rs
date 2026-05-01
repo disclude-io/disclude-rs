@@ -178,6 +178,11 @@ fn check_call(
             _ => {}
         }
     }
+
+    // Python shell/process spawn family: os.system, os.popen, os.spawn*,
+    // subprocess.* (gated on shell=True for the run/call/Popen variants).
+    // Also resolves `__import__('os').system(cmd)` chains.
+    check_python_shellout(node, bytes, path, index, findings);
 }
 
 fn emit_marshal_loads(
@@ -490,6 +495,199 @@ fn push_dynamic_attr(
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Python shell / process-spawn detector
+// ---------------------------------------------------------------------------
+//
+// Mirrors what we already do for C and Bash, applied to the Python family:
+//
+//   * `os.system(cmd)`, `os.popen(cmd)` — always invoke /bin/sh.
+//   * `subprocess.{run,call,check_call,check_output,Popen}(cmd, shell=True)`
+//     — only shell-injection-prone when `shell=True` is present, so we gate
+//     on it. Without `shell=True`, the call is exec-without-shell and
+//     fundamentally less risky.
+//   * `subprocess.getoutput(cmd)`, `subprocess.getstatusoutput(cmd)` — always
+//     shell.
+//   * `os.spawn*` family — fork/exec a binary by path; no shell, but still
+//     surfaceable process-spawn behaviour.
+//
+// Severity:
+//   * non-literal command argument → CRITICAL (runtime-determined target)
+//   * literal command argument     → WARN
+//   * resolved through an `__import__("os").system(...)` chain — CRITICAL
+//     regardless of arg, because the chain itself is the obfuscation: a
+//     normal `import os` would show up in static import scans.
+
+#[derive(Clone, Copy)]
+enum PyShellShape {
+    AlwaysShell,
+    ConditionalShell,
+    Spawn,
+}
+
+fn check_python_shellout(
+    call: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    let Some((qualified, via_dyn_import)) = resolve_qualified_name_with_import(func, bytes) else {
+        return;
+    };
+
+    let shape = match qualified.as_str() {
+        "os.system"
+        | "os.popen"
+        | "subprocess.getoutput"
+        | "subprocess.getstatusoutput" => PyShellShape::AlwaysShell,
+        "subprocess.run"
+        | "subprocess.call"
+        | "subprocess.check_call"
+        | "subprocess.check_output"
+        | "subprocess.Popen" => PyShellShape::ConditionalShell,
+        s if s.starts_with("os.spawn") => PyShellShape::Spawn,
+        _ => return,
+    };
+
+    let Some(args_node) = call.child_by_field_name("arguments") else {
+        return;
+    };
+
+    if matches!(shape, PyShellShape::ConditionalShell) && !has_shell_true(args_node, bytes) {
+        return;
+    }
+
+    let pos = positional_args(args_node);
+    let Some(&first_arg) = pos.first() else {
+        return;
+    };
+    let is_literal = is_literal_expression(first_arg, bytes);
+
+    let (severity, confidence, message) = if via_dyn_import {
+        (
+            Severity::Critical,
+            0.90,
+            format!(
+                "`{}` reached via `__import__(...)` chain — runtime shell call hidden from static imports",
+                qualified
+            ),
+        )
+    } else if is_literal {
+        let body = match shape {
+            PyShellShape::ConditionalShell => {
+                format!("`{}` called with `shell=True` and a literal command", qualified)
+            }
+            PyShellShape::Spawn => {
+                format!("`{}` called with a literal binary path", qualified)
+            }
+            PyShellShape::AlwaysShell => {
+                format!("`{}` called with a literal shell command", qualified)
+            }
+        };
+        (Severity::Warn, 0.70, body)
+    } else {
+        let body = match shape {
+            PyShellShape::ConditionalShell => format!(
+                "`{}` with `shell=True` and a non-literal command — runtime-determined shell invocation",
+                qualified
+            ),
+            PyShellShape::Spawn => format!(
+                "`{}` with a non-literal binary path — runtime-determined process spawn",
+                qualified
+            ),
+            PyShellShape::AlwaysShell => format!(
+                "`{}` called on a non-literal command — runtime-determined shell invocation",
+                qualified
+            ),
+        };
+        (Severity::Critical, 0.85, body)
+    };
+
+    let off = call.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::DynamicExecution,
+        severity,
+        confidence,
+        message,
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+/// Like `callee_qualified_name` but also resolves `__import__("mod").attr`
+/// chains by treating the literal-arg `__import__` call as `mod`. Returns
+/// `(qualified-name, was-resolved-through-__import__)`.
+fn resolve_qualified_name_with_import(func: Node, bytes: &[u8]) -> Option<(String, bool)> {
+    match func.kind() {
+        "identifier" => Some((node_text(func, bytes).to_string(), false)),
+        "attribute" => {
+            let obj = func.child_by_field_name("object")?;
+            let attr = func.child_by_field_name("attribute")?;
+            let attr_name = node_text(attr, bytes).to_string();
+            if obj.kind() == "call" {
+                if let Some(module) = dynamic_import_module_name(obj, bytes) {
+                    return Some((format!("{}.{}", module, attr_name), true));
+                }
+            }
+            let (obj_name, via_dyn) = resolve_qualified_name_with_import(obj, bytes)?;
+            Some((format!("{}.{}", obj_name, attr_name), via_dyn))
+        }
+        _ => None,
+    }
+}
+
+/// If `call` is `__import__("module-name")` with a literal string first arg,
+/// returns the module name. Else `None`.
+fn dynamic_import_module_name<'a>(call: Node, bytes: &'a [u8]) -> Option<&'a str> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "identifier" || node_text(func, bytes) != "__import__" {
+        return None;
+    }
+    let args_node = call.child_by_field_name("arguments")?;
+    let first = positional_args(args_node).first().copied()?;
+    if first.kind() != "string" {
+        return None;
+    }
+    let mut cursor = first.walk();
+    for child in first.children(&mut cursor) {
+        if child.kind() == "string_content" {
+            return std::str::from_utf8(&bytes[child.start_byte()..child.end_byte()]).ok();
+        }
+    }
+    None
+}
+
+/// Returns true when the `arguments` node carries a `shell=True` keyword.
+fn has_shell_true(args_node: Node, bytes: &[u8]) -> bool {
+    let mut cursor = args_node.walk();
+    for child in args_node.children(&mut cursor) {
+        if child.kind() == "keyword_argument" {
+            let name_ok = child
+                .child_by_field_name("name")
+                .map(|n| node_text(n, bytes) == "shell")
+                .unwrap_or(false);
+            let value_true = child
+                .child_by_field_name("value")
+                .map(|v| node_text(v, bytes) == "True")
+                .unwrap_or(false);
+            if name_ok && value_true {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1812,5 +2010,130 @@ mod tests {
         assert!(findings
             .iter()
             .all(|f| f.kind != SignalKind::FrameIntrospection));
+    }
+
+    // -----------------------------------------------------------------------
+    // Python shell / process spawn family
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn os_system_with_variable_is_critical() {
+        let src = b"import os\nos.system(cmd)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("os.system"))
+            .expect("expected DynamicExecution for os.system");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn os_system_with_literal_is_warn() {
+        let src = b"import os\nos.system(\"ls -la\")\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("os.system"))
+            .expect("expected DynamicExecution for os.system literal");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn os_popen_with_variable_is_critical() {
+        let src = b"import os\nos.popen(cmd)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("os.popen"))
+            .expect("expected DynamicExecution for os.popen");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn subprocess_run_without_shell_true_is_ignored() {
+        // subprocess.run(["ls", "-la"]) is exec-without-shell — no shell
+        // injection surface. Don't fire.
+        let src = b"import subprocess\nsubprocess.run([\"ls\", \"-la\"])\n";
+        let findings = run(src);
+        assert!(findings.iter().all(|f| !(f.kind == SignalKind::DynamicExecution
+            && f.message.contains("subprocess.run"))));
+    }
+
+    #[test]
+    fn subprocess_run_with_shell_true_and_variable_is_critical() {
+        let src = b"import subprocess\nsubprocess.run(cmd, shell=True)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("subprocess.run"))
+            .expect("expected DynamicExecution for subprocess.run");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn subprocess_run_with_shell_true_and_literal_is_warn() {
+        let src = b"import subprocess\nsubprocess.run(\"ls -la\", shell=True)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("subprocess.run"))
+            .expect("expected DynamicExecution for subprocess.run literal");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn subprocess_getoutput_always_fires() {
+        // getoutput is always shell-mode — no shell=True gate needed.
+        let src = b"import subprocess\nsubprocess.getoutput(cmd)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution
+                && f.message.contains("subprocess.getoutput"))
+            .expect("expected DynamicExecution for subprocess.getoutput");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn subprocess_check_output_with_shell_false_is_ignored() {
+        // shell=False explicitly (or default) → no fire.
+        let src = b"import subprocess\nsubprocess.check_output([\"ls\"], shell=False)\n";
+        let findings = run(src);
+        assert!(findings.iter().all(|f| !(f.kind == SignalKind::DynamicExecution
+            && f.message.contains("subprocess.check_output"))));
+    }
+
+    #[test]
+    fn dynamic_import_chain_to_system_is_critical() {
+        // `__import__('os').system(cmd)` — the import-laundering shape from
+        // the context.py fixture. Critical regardless of arg type.
+        let src = b"__import__('os').system(\"rm -rf /tmp/x\")\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("__import__"))
+            .expect("expected DynamicExecution for __import__ chain");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("os.system"));
+    }
+
+    #[test]
+    fn dynamic_import_chain_subprocess_is_critical() {
+        let src = b"__import__('subprocess').getoutput(cmd)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("__import__"))
+            .expect("expected DynamicExecution for __import__ chain");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn os_spawn_family_is_detected() {
+        let src = b"import os\nos.spawnl(os.P_WAIT, path, arg0)\n";
+        let findings = run(src);
+        assert!(findings.iter().any(|f| f.kind == SignalKind::DynamicExecution
+            && f.message.contains("os.spawnl")));
+    }
+
+    #[test]
+    fn unrelated_module_attribute_call_is_ignored() {
+        // `mylib.system(x)` — not the os.system builtin, must not fire.
+        let src = b"import mylib\nmylib.system(cmd)\n";
+        let findings = run(src);
+        assert!(findings.iter().all(|f| !(f.kind == SignalKind::DynamicExecution
+            && f.message.contains("system"))));
     }
 }

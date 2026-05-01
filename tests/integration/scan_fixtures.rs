@@ -636,6 +636,42 @@ fn python_getframe_fixture_emits_critical_frame_introspection() {
 }
 
 #[test]
+fn python_context_fixture_emits_dynamic_import_shellout_chain() {
+    // context.py hides destructive shell behaviour inside a context
+    // manager's __exit__ via `__import__('os').system('rm -rf /tmp/...')`.
+    // The detector must resolve the __import__ chain to os.system and
+    // emit CRITICAL because reaching shell-call APIs through __import__
+    // is itself the obfuscation tell.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("python/context.py"))
+        .expect("python/context.py fixture was scanned");
+
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("__import__"))
+        .expect("expected DynamicExecution finding for __import__ chain on context.py");
+    assert_eq!(
+        hit.severity,
+        disclude::finding::Severity::Critical,
+        "__import__('os').system(...) must be CRITICAL, got: {:?}",
+        hit
+    );
+    assert!(
+        hit.message.contains("os.system"),
+        "expected `os.system` resolved through chain, got: {}",
+        hit.message
+    );
+    assert_eq!(
+        hit.line, 6,
+        "finding should anchor on the line with the __import__ call"
+    );
+}
+
+#[test]
 fn c_defines_fixture_emits_macro_keyword_override_and_collision() {
     // IOCCC defines.c rebinds reserved C keywords via `#define` and packs
     // distinct identifiers that collapse to the same visual skeleton.
