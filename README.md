@@ -140,7 +140,7 @@ Token pass; language-aware.
 |---|---|---|
 | `identifier-narrow-charset` | warn | Identifier composed entirely of visually confusable characters (`l`, `I`, `1`, `O`, `0`). Names like `lI1O0lI` are unreadable by design. |
 | `identifier-low-length` | info | File-wide naming-shape signal. Fires when the mean non-conventional identifier length is below 2.0 over at least 20 identifiers, **or** when ≥ 40 % of non-conventional identifiers are exactly one character (over at least 30 identifiers). The second trigger catches IOCCC-style obfuscation where a sprinkling of long keywords (`extern`, `nanosleep`, `TIOCGWINSZ`) inflates the mean above 2.0 even though most globals and functions are single letters. |
-| `string-concat-construction` | warn | String concatenation that reconstructs a sensitive identifier (`exec`, `eval`, `import`, `getattr`, `system`, `require`, etc.). A common pattern to dodge static keyword grep. |
+| `string-concat-construction` | warn | String concatenation that reconstructs a sensitive identifier (`exec`, `eval`, `import`, `getattr`, `system`, `require`, `process`, etc.). A common pattern to dodge static keyword grep. |
 
 ### Dynamic execution — Python
 
@@ -164,6 +164,7 @@ AST pass; tree-sitter.
 | `dynamic-execution` | critical / warn / info | `eval()`, `new Function()`, or `setTimeout`/`setInterval` called with a string argument (critical/warn). `atob(x)` — base64 decode at runtime (warn); the first step of the classic supply-chain pattern: store C2 URL or payload as a base64 literal, decode it, then fetch or exec. `btoa(x)` — base64 encode at runtime (info); used in exfiltration patterns. |
 | `dynamic-import` | warn | `require(expr)` where `expr` is not a string literal, or `` import(`...${expr}...`) `` template. |
 | `dynamic-attribute` | warn | `process.binding(name)` — Node.js internal binding escape hatch, reaches C++ internals not exposed through the public API. |
+| `proxy-global-hijack` | critical | `new Proxy(target, handler)` where `target` is one of `globalThis`, `window`, `global`, `self`, `process`, `document`, or `Object.prototype` / `Array.prototype` / `Function.prototype`. The handler interposes on every property read through that global, so the names it actually wants (`process`, `env`, …) never need to appear in source. Legitimate uses are virtually nonexistent in library or application code. |
 
 ### Dynamic execution — Bash/Shell
 

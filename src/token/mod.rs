@@ -518,6 +518,7 @@ const DANGEROUS_NAMES: &[&str] = &[
     "Function",
     "require",
     "child_process",
+    "process",
     "include_str",
     "include_bytes",
 ];

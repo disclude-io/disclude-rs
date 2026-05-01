@@ -267,16 +267,74 @@ fn check_new(
     let Some(ctor) = new_constructor(node) else {
         return;
     };
-    if ctor.kind() != "identifier" || node_text(ctor, bytes) != "Function" {
+    if ctor.kind() != "identifier" {
         return;
     }
+    let name = node_text(ctor, bytes);
     let Some(args) = new_arguments(node) else {
         return;
     };
-    let Some(first) = positional_args(args).into_iter().next() else {
-        return;
-    };
-    emit_function_ctor(node, first, bytes, path, index, findings);
+    let positional = positional_args(args);
+    match name {
+        "Function" => {
+            if let Some(first) = positional.into_iter().next() {
+                emit_function_ctor(node, first, bytes, path, index, findings);
+            }
+        }
+        "Proxy" => {
+            // `new Proxy(target, handler)` where `target` is one of the
+            // documented globals lets the handler interpose on every
+            // property access through that global — `'process' + 'env'`
+            // never has to appear in source. Only fire on the small fixed
+            // list of globals; legitimate uses (e.g. wrapping a plain
+            // object or an instance) are out of scope.
+            if let Some(first) = positional.first() {
+                if let Some(target) = global_target_name(*first, bytes) {
+                    push(
+                        findings,
+                        node,
+                        bytes,
+                        path,
+                        index,
+                        SignalKind::ProxyGlobalHijack,
+                        Severity::Critical,
+                        0.90,
+                        format!(
+                            "`new Proxy({}, ...)` interposes on a global object — every property read goes through the handler",
+                            target
+                        ),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Return the canonical target name if `node` is one of the well-known
+/// global objects whose interception via `Proxy` is a strong tell.
+fn global_target_name(node: Node, bytes: &[u8]) -> Option<&'static str> {
+    match node.kind() {
+        "identifier" => match node_text(node, bytes) {
+            "globalThis" => Some("globalThis"),
+            "window" => Some("window"),
+            "global" => Some("global"),
+            "self" => Some("self"),
+            "process" => Some("process"),
+            "document" => Some("document"),
+            _ => None,
+        },
+        "member_expression" => {
+            let qual = member_qualified_name(node, bytes)?;
+            match qual.as_str() {
+                "Object.prototype" => Some("Object.prototype"),
+                "Array.prototype" => Some("Array.prototype"),
+                "Function.prototype" => Some("Function.prototype"),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn emit_function_ctor(
@@ -649,6 +707,53 @@ mod tests {
         assert!(f
             .iter()
             .any(|x| x.kind == SignalKind::DynamicExecution && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn proxy_globalthis_is_critical() {
+        let f = run(b"const p = new Proxy(globalThis, h);");
+        let hit = f
+            .iter()
+            .find(|x| x.kind == SignalKind::ProxyGlobalHijack)
+            .expect("expected ProxyGlobalHijack");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("globalThis"));
+    }
+
+    #[test]
+    fn proxy_process_is_critical() {
+        let f = run(b"const p = new Proxy(process, h);");
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::ProxyGlobalHijack && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn proxy_window_is_critical() {
+        let f = run(b"const p = new Proxy(window, h);");
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::ProxyGlobalHijack && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn proxy_object_prototype_is_critical() {
+        let f = run(b"const p = new Proxy(Object.prototype, h);");
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::ProxyGlobalHijack && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn proxy_plain_object_is_ignored() {
+        let f = run(b"const p = new Proxy(target, h);");
+        assert!(f.iter().all(|x| x.kind != SignalKind::ProxyGlobalHijack));
+    }
+
+    #[test]
+    fn proxy_object_literal_is_ignored() {
+        let f = run(b"const p = new Proxy({}, h);");
+        assert!(f.iter().all(|x| x.kind != SignalKind::ProxyGlobalHijack));
     }
 
     #[test]

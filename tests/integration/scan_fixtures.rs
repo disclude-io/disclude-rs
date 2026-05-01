@@ -672,6 +672,69 @@ fn python_context_fixture_emits_dynamic_import_shellout_chain() {
 }
 
 #[test]
+fn typescript_proxy_gate_fixture_emits_proxy_global_hijack() {
+    // proxy_gate.ts wraps `globalThis` in a Proxy whose `get` handler
+    // reassembles "process" from a small map and returns the value
+    // through bracket subscript. The string literals never appear in
+    // direct form, so the AST signal that anchors detection is
+    // ProxyGlobalHijack on `new Proxy(globalThis, ...)`.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/proxy_gate.ts")
+        })
+        .expect("typescript/proxy_gate.ts fixture was scanned");
+
+    let hijack = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::ProxyGlobalHijack)
+        .expect("expected ProxyGlobalHijack on proxy_gate.ts");
+    assert_eq!(hijack.severity, disclude::finding::Severity::Critical);
+    assert!(
+        hijack.message.contains("globalThis"),
+        "expected message to name the global target, got: {}",
+        hijack.message
+    );
+    assert_eq!(
+        hijack.line, 10,
+        "finding should anchor on the `new Proxy(globalThis, handler)` line"
+    );
+}
+
+#[test]
+fn typescript_string_concat_watchlist_includes_process() {
+    // Cross-cutting check on the token-pass watchlist — concatenated
+    // string literals that reconstruct `process` should fire
+    // StringConcatConstruction. We exercise the rule directly with a
+    // synthetic source to avoid coupling to an existing fixture.
+    use disclude::language::Language;
+    use disclude::util::LineIndex;
+    use std::path::PathBuf;
+    let src = b"const a = 'proc' + 'ess';\n";
+    let index = LineIndex::new(src);
+    let findings = disclude::token::analyze(
+        &PathBuf::from("synth.ts"),
+        src,
+        Language::TypeScript,
+        &index,
+        Vec::new(),
+    );
+    let process_hit = findings
+        .iter()
+        .find(|f| f.kind == SignalKind::StringConcatConstruction && f.message.contains("process"));
+    assert!(
+        process_hit.is_some(),
+        "expected `process` concat to fire StringConcatConstruction, got: {:?}",
+        findings
+    );
+}
+
+#[test]
 fn c_defines_fixture_emits_macro_keyword_override_and_collision() {
     // IOCCC defines.c rebinds reserved C keywords via `#define` and packs
     // distinct identifiers that collapse to the same visual skeleton.

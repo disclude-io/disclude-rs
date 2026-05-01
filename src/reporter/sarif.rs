@@ -188,6 +188,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::DecoderImportWithExec,
     SignalKind::BuiltinsWrite,
     SignalKind::FrameIntrospection,
+    SignalKind::ProxyGlobalHijack,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -232,6 +233,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::DecoderImportWithExec => "DecoderImportWithExec",
         SignalKind::BuiltinsWrite => "BuiltinsWrite",
         SignalKind::FrameIntrospection => "FrameIntrospection",
+        SignalKind::ProxyGlobalHijack => "ProxyGlobalHijack",
     }
 }
 
@@ -313,6 +315,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::FrameIntrospection => {
             "Call-stack frame introspection (sys._getframe / inspect.* / settrace) — anti-analysis tell"
         }
+        SignalKind::ProxyGlobalHijack => {
+            "`new Proxy(...)` wraps a global object — interposes on every property access"
+        }
     }
 }
 
@@ -324,7 +329,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::BuildScriptShellout
         | SignalKind::NumericLiteralPayload
         | SignalKind::FormatStringWrite
-        | SignalKind::BuiltinsWrite => Severity::Critical,
+        | SignalKind::BuiltinsWrite
+        | SignalKind::ProxyGlobalHijack => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

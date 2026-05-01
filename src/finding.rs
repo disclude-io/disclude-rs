@@ -58,6 +58,7 @@ pub enum SignalKind {
     DecoderImportWithExec,
     BuiltinsWrite,
     FrameIntrospection,
+    ProxyGlobalHijack,
 }
 
 impl SignalKind {
@@ -103,6 +104,7 @@ impl SignalKind {
             SignalKind::DecoderImportWithExec => "decoder-import-with-exec",
             SignalKind::BuiltinsWrite => "builtins-write",
             SignalKind::FrameIntrospection => "frame-introspection",
+            SignalKind::ProxyGlobalHijack => "proxy-global-hijack",
         }
     }
 }
