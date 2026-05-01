@@ -57,6 +57,7 @@ pub enum SignalKind {
     PayloadBytesLiteral,
     DecoderImportWithExec,
     BuiltinsWrite,
+    FrameIntrospection,
 }
 
 impl SignalKind {
@@ -101,6 +102,7 @@ impl SignalKind {
             SignalKind::PayloadBytesLiteral => "payload-bytes-literal",
             SignalKind::DecoderImportWithExec => "decoder-import-with-exec",
             SignalKind::BuiltinsWrite => "builtins-write",
+            SignalKind::FrameIntrospection => "frame-introspection",
         }
     }
 }

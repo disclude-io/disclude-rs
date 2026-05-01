@@ -153,6 +153,7 @@ AST pass; tree-sitter.
 | `dynamic-attribute` | warn | `getattr(obj, name)` where `name` is not a string literal — runtime-resolved attribute lookup. |
 | `payload-bytes-literal` | warn | A `b"..."` / `b'...'` literal whose content is dominated by `\xNN` escapes (≥32 escapes AND ≥30% of content). Real bytes literals are short and purposeful; a long, hex-dense literal is the shape of a compressed/encrypted code blob waiting to be unpacked. |
 | `decoder-import-with-exec` | warn | The file imports a decoder/decompressor module (`base64`, `binascii`, `codecs`, `marshal`, `pickle`, `zlib`, `gzip`, `lzma`, `bz2`) AND calls the bare `exec`/`eval`/`compile` builtin. The combination is the multi-stage payload shape: blob → decode → run. Either piece alone is benign; together they are suspicious. |
+| `frame-introspection` | critical / warn | Call-stack frame introspection: `sys._getframe`, `inspect.currentframe`, `inspect.stack`, `inspect.getouterframes`, `sys.settrace`, or `sys.setprofile`. Outside debuggers, profilers, and a small set of frameworks (`loguru`, `structlog`, `decorator`) these have essentially no legitimate use. Warn by default; elevated to critical when the same file also calls `sys.exit`/`exec`/`eval` — the bail-on-detection / decode-then-execute shape. |
 
 ### Dynamic execution — TypeScript / JavaScript
 

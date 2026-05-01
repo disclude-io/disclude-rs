@@ -600,6 +600,42 @@ fn python_multi_stage_fixture_emits_three_signals() {
 }
 
 #[test]
+fn python_getframe_fixture_emits_critical_frame_introspection() {
+    // getframe.py uses `sys._getframe(1).f_globals` to snoop on the caller
+    // and then bails with `sys.exit()` if it sees an analyzer in the stack.
+    // The introspection signal should fire and elevate to CRITICAL because
+    // the file also contains an exec/eval/sys.exit elevation trigger.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("python/getframe.py"))
+        .expect("python/getframe.py fixture was scanned");
+
+    let intro = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::FrameIntrospection)
+        .expect("expected FrameIntrospection on getframe.py");
+    assert_eq!(
+        intro.severity,
+        disclude::finding::Severity::Critical,
+        "_getframe + sys.exit must elevate to CRITICAL, got: {:?}",
+        intro
+    );
+    assert!(
+        intro.message.contains("sys._getframe"),
+        "expected `sys._getframe` cited in message, got: {}",
+        intro.message
+    );
+    assert!(
+        intro.message.contains("anti-analysis"),
+        "expected anti-analysis suffix, got: {}",
+        intro.message
+    );
+}
+
+#[test]
 fn c_defines_fixture_emits_macro_keyword_override_and_collision() {
     // IOCCC defines.c rebinds reserved C keywords via `#define` and packs
     // distinct identifiers that collapse to the same visual skeleton.

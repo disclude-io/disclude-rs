@@ -57,6 +57,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     check_payload_bytes_literals(root, bytes, path, &index, &mut findings);
     check_decoder_import_with_exec(root, bytes, path, &index, &mut findings);
     check_obfuscated_byte_strings(root, bytes, path, &index, &mut findings);
+    check_frame_introspection(root, bytes, path, &index, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -1165,6 +1166,119 @@ fn inspect_bytes_list_decode(
 }
 
 // ---------------------------------------------------------------------------
+// Frame-introspection detector
+// ---------------------------------------------------------------------------
+//
+// `sys._getframe()`, `inspect.currentframe()`, `inspect.stack()`,
+// `inspect.getouterframes()`, `sys.settrace()`, `sys.setprofile()` are the
+// canonical Python escape hatches for reaching outside the current call —
+// inspecting the caller's globals/locals or installing a hook on every
+// instruction. Outside debuggers, profilers, and a small set of frameworks
+// (loguru depth tracking, decorator, structlog, pdb integrations) they
+// have essentially no legitimate use.
+//
+// Default severity is WARN. Elevated to CRITICAL when the same file also
+// calls `sys.exit`, `exec`, or `eval` — the bail-on-detection / decode-
+// then-execute shape that says "introspection is gating real behaviour".
+//
+// One finding per call site, anchored at the introspection call.
+
+const FRAME_INTROSPECTION_QUALIFIED: &[&str] = &[
+    "sys._getframe",
+    "inspect.currentframe",
+    "inspect.stack",
+    "inspect.getouterframes",
+    "sys.settrace",
+    "sys.setprofile",
+];
+
+fn check_frame_introspection(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut intro_calls: Vec<(Node, &'static str)> = Vec::new();
+    let mut has_elevation_trigger = false;
+
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "call" {
+            if let Some(name) = frame_introspection_name(node, bytes) {
+                intro_calls.push((node, name));
+            } else if call_is_exec_sink(node, bytes) || call_is_sys_exit(node, bytes) {
+                has_elevation_trigger = true;
+            }
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+
+    if intro_calls.is_empty() {
+        return;
+    }
+
+    let (severity, confidence) = if has_elevation_trigger {
+        (Severity::Critical, 0.85)
+    } else {
+        (Severity::Warn, 0.70)
+    };
+
+    for (call, name) in intro_calls {
+        let off = call.start_byte();
+        let (line, col) = index.locate(off);
+        let suffix = if has_elevation_trigger {
+            " — file also calls `sys.exit`/`exec`/`eval` (anti-analysis shape)"
+        } else {
+            ""
+        };
+        findings.push(Finding {
+            path: path.to_path_buf(),
+            byte_offset: off,
+            line,
+            col,
+            pass: PassKind::Ast,
+            kind: SignalKind::FrameIntrospection,
+            severity,
+            confidence,
+            message: format!("`{}` — call-stack frame introspection{}", name, suffix),
+            snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+            diff_introduced: false,
+        });
+    }
+}
+
+/// Returns the canonical name (e.g. "sys._getframe") if the call's callee
+/// matches one of the introspection APIs, else None.
+fn frame_introspection_name(call: Node, bytes: &[u8]) -> Option<&'static str> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "attribute" {
+        return None;
+    }
+    let qualified = callee_qualified_name(func, bytes)?;
+    FRAME_INTROSPECTION_QUALIFIED
+        .iter()
+        .copied()
+        .find(|n| *n == qualified.as_str())
+}
+
+fn call_is_sys_exit(call: Node, bytes: &[u8]) -> bool {
+    let Some(func) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if func.kind() != "attribute" {
+        return false;
+    }
+    callee_qualified_name(func, bytes)
+        .map(|q| q == "sys.exit")
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1604,5 +1718,99 @@ mod tests {
         let src = b"import builtins\n_orig = builtins.open\n";
         let findings = run(src);
         assert!(findings.iter().all(|f| f.kind != SignalKind::BuiltinsWrite));
+    }
+
+    // -----------------------------------------------------------------------
+    // frame-introspection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sys_getframe_alone_is_warn() {
+        // No exec/eval/sys.exit in the file → warn, not critical.
+        let src = b"import sys\nf = sys._getframe(1)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::FrameIntrospection)
+            .expect("expected FrameIntrospection finding");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(
+            hit.message.contains("sys._getframe"),
+            "expected `sys._getframe` cited in message, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn sys_getframe_with_sys_exit_is_critical() {
+        // The bail-on-detection shape from getframe.py.
+        let src = b"import sys\nif \"x\" in sys._getframe(1).f_globals:\n    sys.exit()\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::FrameIntrospection)
+            .expect("expected FrameIntrospection finding");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(
+            hit.message.contains("anti-analysis"),
+            "expected anti-analysis suffix, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn inspect_currentframe_is_detected() {
+        let src = b"import inspect\nf = inspect.currentframe()\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::FrameIntrospection)
+            .expect("expected FrameIntrospection finding");
+        assert!(hit.message.contains("inspect.currentframe"));
+    }
+
+    #[test]
+    fn inspect_stack_is_detected() {
+        let src = b"import inspect\nfor frame in inspect.stack():\n    pass\n";
+        let findings = run(src);
+        assert!(findings.iter().any(
+            |f| f.kind == SignalKind::FrameIntrospection && f.message.contains("inspect.stack")
+        ));
+    }
+
+    #[test]
+    fn sys_settrace_is_detected() {
+        let src = b"import sys\nsys.settrace(tracer)\n";
+        let findings = run(src);
+        assert!(findings.iter().any(
+            |f| f.kind == SignalKind::FrameIntrospection && f.message.contains("sys.settrace")
+        ));
+    }
+
+    #[test]
+    fn settrace_with_exec_is_critical() {
+        let src = b"import sys\nsys.settrace(tracer)\nexec(payload)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::FrameIntrospection)
+            .expect("expected FrameIntrospection finding");
+        assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn ordinary_function_call_is_not_introspection() {
+        // Regression: only the qualified introspection names should fire.
+        let src = b"def _getframe(x): return x\n_getframe(1)\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::FrameIntrospection));
+    }
+
+    #[test]
+    fn unrelated_sys_attribute_call_does_not_fire() {
+        // `sys.path` access, `sys.argv` etc. — only the listed APIs fire.
+        let src = b"import sys\nprint(sys.argv)\nsys.path.append(\"x\")\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::FrameIntrospection));
     }
 }

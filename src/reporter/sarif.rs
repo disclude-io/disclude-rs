@@ -187,6 +187,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::PayloadBytesLiteral,
     SignalKind::DecoderImportWithExec,
     SignalKind::BuiltinsWrite,
+    SignalKind::FrameIntrospection,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -230,6 +231,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::PayloadBytesLiteral => "PayloadBytesLiteral",
         SignalKind::DecoderImportWithExec => "DecoderImportWithExec",
         SignalKind::BuiltinsWrite => "BuiltinsWrite",
+        SignalKind::FrameIntrospection => "FrameIntrospection",
     }
 }
 
@@ -307,6 +309,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::BuiltinsWrite => {
             "Direct write to the builtins namespace — patches a built-in for every importer"
+        }
+        SignalKind::FrameIntrospection => {
+            "Call-stack frame introspection (sys._getframe / inspect.* / settrace) — anti-analysis tell"
         }
     }
 }
