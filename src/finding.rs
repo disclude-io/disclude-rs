@@ -59,6 +59,7 @@ pub enum SignalKind {
     BuiltinsWrite,
     FrameIntrospection,
     ProxyGlobalHijack,
+    TagFunctionDeobfuscator,
 }
 
 impl SignalKind {
@@ -105,6 +106,7 @@ impl SignalKind {
             SignalKind::BuiltinsWrite => "builtins-write",
             SignalKind::FrameIntrospection => "frame-introspection",
             SignalKind::ProxyGlobalHijack => "proxy-global-hijack",
+            SignalKind::TagFunctionDeobfuscator => "tag-function-deobfuscator",
         }
     }
 }

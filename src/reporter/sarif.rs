@@ -189,6 +189,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::BuiltinsWrite,
     SignalKind::FrameIntrospection,
     SignalKind::ProxyGlobalHijack,
+    SignalKind::TagFunctionDeobfuscator,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -234,6 +235,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::BuiltinsWrite => "BuiltinsWrite",
         SignalKind::FrameIntrospection => "FrameIntrospection",
         SignalKind::ProxyGlobalHijack => "ProxyGlobalHijack",
+        SignalKind::TagFunctionDeobfuscator => "TagFunctionDeobfuscator",
     }
 }
 
@@ -318,6 +320,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::ProxyGlobalHijack => {
             "`new Proxy(...)` wraps a global object — interposes on every property access"
         }
+        SignalKind::TagFunctionDeobfuscator => {
+            "Tagged-template tag function decodes its template strings (reverse / atob / fromCharCode)"
+        }
     }
 }
 
@@ -330,7 +335,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::NumericLiteralPayload
         | SignalKind::FormatStringWrite
         | SignalKind::BuiltinsWrite
-        | SignalKind::ProxyGlobalHijack => Severity::Critical,
+        | SignalKind::ProxyGlobalHijack
+        | SignalKind::TagFunctionDeobfuscator => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

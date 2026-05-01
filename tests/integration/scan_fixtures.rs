@@ -707,6 +707,39 @@ fn typescript_proxy_gate_fixture_emits_proxy_global_hijack() {
 }
 
 #[test]
+fn typescript_template_fixture_emits_tag_function_deobfuscator() {
+    // template.ts defines a tag function `r` that reverses each
+    // template-string segment, then uses `` r`...` `` to materialize the
+    // real C2 URL at runtime. Detection requires resolving the tag
+    // identifier back to a function whose body applies a decoding op.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/template.ts")
+        })
+        .expect("typescript/template.ts fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::TagFunctionDeobfuscator)
+        .expect("expected TagFunctionDeobfuscator on template.ts");
+    assert_eq!(hit.severity, disclude::finding::Severity::Critical);
+    assert!(
+        hit.message.contains("`r`"),
+        "expected message to name the tag function, got: {}",
+        hit.message
+    );
+    assert_eq!(
+        hit.line, 7,
+        "finding should anchor on the `r\\`...\\`` use, not the function declaration"
+    );
+}
+
+#[test]
 fn typescript_string_concat_watchlist_includes_process() {
     // Cross-cutting check on the token-pass watchlist — concatenated
     // string literals that reconstruct `process` should fire

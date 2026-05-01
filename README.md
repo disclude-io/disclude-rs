@@ -165,6 +165,7 @@ AST pass; tree-sitter.
 | `dynamic-import` | warn | `require(expr)` where `expr` is not a string literal, or `` import(`...${expr}...`) `` template. |
 | `dynamic-attribute` | warn | `process.binding(name)` — Node.js internal binding escape hatch, reaches C++ internals not exposed through the public API. |
 | `proxy-global-hijack` | critical | `new Proxy(target, handler)` where `target` is one of `globalThis`, `window`, `global`, `self`, `process`, `document`, or `Object.prototype` / `Array.prototype` / `Function.prototype`. The handler interposes on every property read through that global, so the names it actually wants (`process`, `env`, …) never need to appear in source. Legitimate uses are virtually nonexistent in library or application code. |
+| `tag-function-deobfuscator` | critical | A tagged template `` tag`...` `` whose `tag` resolves to a function that *transforms* its template strings — `.reverse()`, `String.fromCharCode`, `atob`, `Buffer.from`, or `parseInt(_, 16)` — rather than passing them through. Legit tag functions (`gql`, `css`, `sql`, `html`, `lit`, `styled`) parse or stitch their input; tags that decode it are the "store payload reversed/encoded inside a literal, deobfuscate at runtime" pattern. The function's first parameter must be named `strings` or typed `TemplateStringsArray`; the rule only fires when the function is actually used as a template tag in this same file. |
 
 ### Dynamic execution — Bash/Shell
 

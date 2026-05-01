@@ -20,6 +20,7 @@
 //! strings with substitutions are treated as constructed strings, as is
 //! `a + b` binary-plus with any string operand.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use tree_sitter::{Node, Parser};
@@ -62,8 +63,9 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
         None
     };
     let index = LineIndex::new(bytes);
+    let tag_deobfuscators = collect_tag_deobfuscators(root, bytes);
     let mut findings = Vec::new();
-    walk(root, bytes, path, &index, &mut findings);
+    walk(root, bytes, path, &index, &tag_deobfuscators, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -71,11 +73,18 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
     }
 }
 
-fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut Vec<Finding>) {
+fn walk(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    tag_deobfuscators: &HashSet<String>,
+    findings: &mut Vec<Finding>,
+) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         match node.kind() {
-            "call_expression" => check_call(node, bytes, path, index, findings),
+            "call_expression" => check_call(node, bytes, path, index, tag_deobfuscators, findings),
             "new_expression" => check_new(node, bytes, path, index, findings),
             _ => {}
         }
@@ -96,6 +105,7 @@ fn check_call(
     bytes: &[u8],
     path: &Path,
     index: &LineIndex,
+    tag_deobfuscators: &HashSet<String>,
     findings: &mut Vec<Finding>,
 ) {
     let Some(func) = call_function(node) else {
@@ -104,6 +114,33 @@ fn check_call(
     let Some(args) = call_arguments(node) else {
         return;
     };
+
+    // Tagged template literal — `tag\`...\`` parses as a call_expression
+    // whose arguments node is the template_string itself. Route those
+    // separately; the rest of this function expects an argument list.
+    if args.kind() == "template_string" {
+        if func.kind() == "identifier" {
+            let name = node_text(func, bytes);
+            if tag_deobfuscators.contains(name) {
+                push(
+                    findings,
+                    node,
+                    bytes,
+                    path,
+                    index,
+                    SignalKind::TagFunctionDeobfuscator,
+                    Severity::Critical,
+                    0.90,
+                    format!(
+                        "tagged template uses tag function `{}` whose body decodes its template strings — payload is hidden in the literal",
+                        name
+                    ),
+                );
+            }
+        }
+        return;
+    }
+
     let positional: Vec<Node> = positional_args(args);
 
     // Dynamic `import(x)` — the callee is an `import` keyword node.
@@ -540,6 +577,167 @@ fn push(
 }
 
 // ---------------------------------------------------------------------------
+// Tag-function deobfuscator collection
+// ---------------------------------------------------------------------------
+//
+// A tag function whose first parameter is `strings` (or typed
+// `TemplateStringsArray`) and whose body applies a decoding op to that
+// parameter is the classic "store payload in a tagged template literal,
+// reverse/atob/fromCharCode it back at runtime" pattern. Legitimate tag
+// functions — gql, css, sql, html, lit, styled — pass strings through or
+// parse them; they do not reverse, base64-decode, or rebuild from char
+// codes. The combination is highly specific to obfuscation.
+//
+// We collect such function names in a single pre-pass, then the main walk
+// flags any tagged-template call whose tag identifier is in the set.
+
+fn collect_tag_deobfuscators(root: Node, bytes: &[u8]) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "function_declaration" => {
+                if is_tag_deobfuscator_fn(node, bytes) {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        names.insert(node_text(name_node, bytes).to_string());
+                    }
+                }
+            }
+            "variable_declarator" => {
+                if let Some(value) = node.child_by_field_name("value") {
+                    if matches!(
+                        value.kind(),
+                        "arrow_function" | "function_expression" | "function"
+                    ) && is_tag_deobfuscator_fn(value, bytes)
+                    {
+                        if let Some(name_node) = node.child_by_field_name("name") {
+                            if name_node.kind() == "identifier" {
+                                names.insert(node_text(name_node, bytes).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+    names
+}
+
+/// Returns true if `fn_node` (a `function_declaration`, `arrow_function`,
+/// or `function_expression`) takes a `strings` / `TemplateStringsArray`
+/// first parameter AND its body contains a string-decoding operation.
+fn is_tag_deobfuscator_fn(fn_node: Node, bytes: &[u8]) -> bool {
+    let Some(params) = fn_node.child_by_field_name("parameters") else {
+        // Arrow functions of the form `s => ...` use the `parameter` field
+        // for a single identifier, not `parameters`. Check that path too.
+        let Some(p) = fn_node.child_by_field_name("parameter") else {
+            return false;
+        };
+        if p.kind() == "identifier" && node_text(p, bytes) == "strings" {
+            if let Some(body) = fn_node.child_by_field_name("body") {
+                return body_has_decode_op(body, bytes);
+            }
+        }
+        return false;
+    };
+    if !first_param_is_template_strings(params, bytes) {
+        return false;
+    }
+    let Some(body) = fn_node.child_by_field_name("body") else {
+        return false;
+    };
+    body_has_decode_op(body, bytes)
+}
+
+fn first_param_is_template_strings(params: Node, bytes: &[u8]) -> bool {
+    // `formal_parameters`: `(`, required_parameter*, `)`.
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        match child.kind() {
+            "(" | ")" | "," => continue,
+            "required_parameter" | "optional_parameter" => {
+                return param_looks_like_template_strings(child, bytes);
+            }
+            // Single-identifier arrow-function param falls back here.
+            "identifier" => {
+                return node_text(child, bytes) == "strings";
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn param_looks_like_template_strings(param: Node, bytes: &[u8]) -> bool {
+    // The pattern child is the parameter name; type_annotation child carries
+    // the TS type. Either being a strings/TemplateStringsArray hint is enough.
+    let mut cursor = param.walk();
+    for child in param.children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                if node_text(child, bytes) == "strings" {
+                    return true;
+                }
+            }
+            "type_annotation" => {
+                if node_text(child, bytes).contains("TemplateStringsArray") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Walk `body` for any of the decoding operations a tag-function
+/// deobfuscator applies to its template strings.
+fn body_has_decode_op(body: Node, bytes: &[u8]) -> bool {
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "member_expression" {
+            if let Some(prop) = node.child_by_field_name("property") {
+                let pname = node_text(prop, bytes);
+                if matches!(pname, "reverse" | "fromCharCode") {
+                    return true;
+                }
+            }
+        }
+        if node.kind() == "call_expression" {
+            if let Some(f) = node.child_by_field_name("function") {
+                match f.kind() {
+                    "identifier" => {
+                        if matches!(node_text(f, bytes), "atob" | "parseInt") {
+                            return true;
+                        }
+                    }
+                    "member_expression" => {
+                        if let Some(qual) = member_qualified_name(f, bytes) {
+                            if matches!(qual.as_str(), "Buffer.from" | "String.fromCharCode") {
+                                return true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for i in 0..node.child_count() as u32 {
+            if let Some(c) = node.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -754,6 +952,103 @@ mod tests {
     fn proxy_object_literal_is_ignored() {
         let f = run(b"const p = new Proxy({}, h);");
         assert!(f.iter().all(|x| x.kind != SignalKind::ProxyGlobalHijack));
+    }
+
+    #[test]
+    fn tag_fn_with_reverse_is_critical() {
+        let src = b"function r(strings: TemplateStringsArray) {\n\
+            return strings.map(s => s.split('').reverse().join('')).join('');\n\
+        }\n\
+        const u = r`mc.revres-larrefe/moc.evil.ppa`;\n";
+        let f = run(src);
+        let hit = f
+            .iter()
+            .find(|x| x.kind == SignalKind::TagFunctionDeobfuscator)
+            .expect("expected TagFunctionDeobfuscator");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("`r`"));
+    }
+
+    #[test]
+    fn tag_fn_with_atob_is_critical() {
+        let src = b"function t(strings: TemplateStringsArray) {\n\
+            return atob(strings.join(''));\n\
+        }\n\
+        const v = t`SGVsbG8=`;\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::TagFunctionDeobfuscator
+                && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn tag_fn_with_from_char_code_is_critical() {
+        let src = b"function c(strings: TemplateStringsArray) {\n\
+            return String.fromCharCode(...strings.map(s => parseInt(s, 16)));\n\
+        }\n\
+        const w = c`48 69`;\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::TagFunctionDeobfuscator
+                && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn arrow_tag_fn_is_critical() {
+        let src = b"const r = (strings: TemplateStringsArray) => \
+            strings.map(s => s.split('').reverse().join('')).join('');\n\
+        const u = r`abc`;\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::TagFunctionDeobfuscator
+                && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn passthrough_tag_fn_is_ignored() {
+        // Tag function that just stitches strings together — common shape
+        // for gql/sql/css. No decode op in the body.
+        let src = b"function gql(strings: TemplateStringsArray) {\n\
+            return strings.join('');\n\
+        }\n\
+        const q = gql`query { a }`;\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .all(|x| x.kind != SignalKind::TagFunctionDeobfuscator));
+    }
+
+    #[test]
+    fn unrelated_function_not_used_as_tag_is_ignored() {
+        // The function takes `strings` and reverses them, but is never
+        // used as a template tag. Without a tagged-template usage we do
+        // not fire — the deobfuscation is not actually wired up.
+        let src = b"function r(strings: TemplateStringsArray) {\n\
+            return strings.map(s => s.split('').reverse().join('')).join('');\n\
+        }\n\
+        const x = 1;\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .all(|x| x.kind != SignalKind::TagFunctionDeobfuscator));
+    }
+
+    #[test]
+    fn tag_fn_without_strings_param_is_ignored() {
+        // First param is named `parts`, not `strings`, and lacks the
+        // TemplateStringsArray type annotation. The body still reverses,
+        // but the param-name gate keeps the rule from firing.
+        let src = b"function r(parts: any) {\n\
+            return parts.split('').reverse().join('');\n\
+        }\n\
+        const u = r('abc');\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .all(|x| x.kind != SignalKind::TagFunctionDeobfuscator));
     }
 
     #[test]
