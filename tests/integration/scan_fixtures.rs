@@ -815,8 +815,16 @@ fn typescript_generators_fixture_emits_generator_yield_callable() {
         );
     }
     let lines: Vec<usize> = hits.iter().map(|h| h.line).collect();
-    assert!(lines.contains(&5), "expected hit on yield line 5, got {:?}", lines);
-    assert!(lines.contains(&10), "expected hit on yield line 10, got {:?}", lines);
+    assert!(
+        lines.contains(&5),
+        "expected hit on yield line 5, got {:?}",
+        lines
+    );
+    assert!(
+        lines.contains(&10),
+        "expected hit on yield line 10, got {:?}",
+        lines
+    );
 }
 
 #[test]

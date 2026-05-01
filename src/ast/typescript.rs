@@ -1306,14 +1306,15 @@ mod tests {
     fn generator_yields_function_expression_is_warn() {
         let src = b"function* g() {\n    yield function () { return 1; };\n}\n";
         let f = run(src);
-        assert!(f.iter().any(
-            |x| x.kind == SignalKind::GeneratorYieldCallable && x.severity == Severity::Warn
-        ));
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::GeneratorYieldCallable && x.severity == Severity::Warn));
     }
 
     #[test]
     fn generator_yields_data_is_ignored() {
-        let src = b"function* g() {\n    yield 1;\n    yield { stage: 'a' };\n    yield 'literal';\n}\n";
+        let src =
+            b"function* g() {\n    yield 1;\n    yield { stage: 'a' };\n    yield 'literal';\n}\n";
         let f = run(src);
         assert!(f
             .iter()
