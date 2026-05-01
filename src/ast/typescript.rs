@@ -596,11 +596,9 @@ fn collect_tag_deobfuscators(root: Node, bytes: &[u8]) -> HashSet<String> {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         match node.kind() {
-            "function_declaration" => {
-                if is_tag_deobfuscator_fn(node, bytes) {
-                    if let Some(name_node) = node.child_by_field_name("name") {
-                        names.insert(node_text(name_node, bytes).to_string());
-                    }
+            "function_declaration" if is_tag_deobfuscator_fn(node, bytes) => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    names.insert(node_text(name_node, bytes).to_string());
                 }
             }
             "variable_declarator" => {
@@ -680,15 +678,9 @@ fn param_looks_like_template_strings(param: Node, bytes: &[u8]) -> bool {
     let mut cursor = param.walk();
     for child in param.children(&mut cursor) {
         match child.kind() {
-            "identifier" => {
-                if node_text(child, bytes) == "strings" {
-                    return true;
-                }
-            }
-            "type_annotation" => {
-                if node_text(child, bytes).contains("TemplateStringsArray") {
-                    return true;
-                }
+            "identifier" if node_text(child, bytes) == "strings" => return true,
+            "type_annotation" if node_text(child, bytes).contains("TemplateStringsArray") => {
+                return true
             }
             _ => {}
         }
