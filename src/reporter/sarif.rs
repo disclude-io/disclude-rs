@@ -192,6 +192,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::TagFunctionDeobfuscator,
     SignalKind::DataUriImport,
     SignalKind::GeneratorYieldCallable,
+    SignalKind::ErrorStackInspection,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -240,6 +241,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::TagFunctionDeobfuscator => "TagFunctionDeobfuscator",
         SignalKind::DataUriImport => "DataUriImport",
         SignalKind::GeneratorYieldCallable => "GeneratorYieldCallable",
+        SignalKind::ErrorStackInspection => "ErrorStackInspection",
     }
 }
 
@@ -332,6 +334,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::GeneratorYieldCallable => {
             "Generator (`function*`) yields callables — state-machine deobfuscator pattern"
+        }
+        SignalKind::ErrorStackInspection => {
+            "`new Error().stack` is read and string-matched — sandbox/analyzer detection"
         }
     }
 }

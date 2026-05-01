@@ -780,6 +780,42 @@ fn typescript_dynamic_import_fixture_emits_data_uri_import_critical() {
 }
 
 #[test]
+fn typescript_error_stack_fixture_emits_error_stack_inspection() {
+    // error_stack.ts binds `const stack = new Error().stack || ''` and then
+    // calls `stack.includes(...)` twice to fingerprint analysis runners.
+    // Detection must resolve the variable through the `||` fallback and
+    // fire on each match call.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/error_stack.ts")
+        })
+        .expect("typescript/error_stack.ts fixture was scanned");
+    let hits: Vec<_> = file
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::ErrorStackInspection)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        2,
+        "expected 2 ErrorStackInspection findings (one per .includes call), got {:?}",
+        file.findings
+    );
+    for h in &hits {
+        assert_eq!(h.severity, disclude::finding::Severity::Warn);
+        assert_eq!(
+            h.line, 5,
+            "both match calls live on line 5 (the return expression)"
+        );
+    }
+}
+
+#[test]
 fn typescript_generators_fixture_emits_generator_yield_callable() {
     // generators.ts defines `function* dispatcher()` that yields two
     // arrow functions; the driver pulls each out with `g.next().value!()`

@@ -62,6 +62,7 @@ pub enum SignalKind {
     TagFunctionDeobfuscator,
     DataUriImport,
     GeneratorYieldCallable,
+    ErrorStackInspection,
 }
 
 impl SignalKind {
@@ -111,6 +112,7 @@ impl SignalKind {
             SignalKind::TagFunctionDeobfuscator => "tag-function-deobfuscator",
             SignalKind::DataUriImport => "data-uri-import",
             SignalKind::GeneratorYieldCallable => "generator-yield-callable",
+            SignalKind::ErrorStackInspection => "error-stack-inspection",
         }
     }
 }

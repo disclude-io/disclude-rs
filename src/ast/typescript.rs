@@ -65,6 +65,7 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
     let index = LineIndex::new(bytes);
     let tag_deobfuscators = collect_tag_deobfuscators(root, bytes);
     let data_uri_vars = collect_data_uri_vars(root, bytes);
+    let error_stack_vars = collect_error_stack_vars(root, bytes);
     let mut findings = Vec::new();
     walk(
         root,
@@ -73,6 +74,7 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
         &index,
         &tag_deobfuscators,
         &data_uri_vars,
+        &error_stack_vars,
         &mut findings,
     );
     AstOutcome {
@@ -82,6 +84,7 @@ pub fn analyze(path: &Path, bytes: &[u8], _lang: Language) -> AstOutcome {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     root: Node,
     bytes: &[u8],
@@ -89,6 +92,7 @@ fn walk(
     index: &LineIndex,
     tag_deobfuscators: &HashSet<String>,
     data_uri_vars: &HashSet<String>,
+    error_stack_vars: &HashSet<String>,
     findings: &mut Vec<Finding>,
 ) {
     let mut stack = vec![root];
@@ -101,6 +105,7 @@ fn walk(
                 index,
                 tag_deobfuscators,
                 data_uri_vars,
+                error_stack_vars,
                 findings,
             ),
             "new_expression" => check_new(node, bytes, path, index, findings),
@@ -119,6 +124,7 @@ fn walk(
 // call_expression
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn check_call(
     node: Node,
     bytes: &[u8],
@@ -126,6 +132,7 @@ fn check_call(
     index: &LineIndex,
     tag_deobfuscators: &HashSet<String>,
     data_uri_vars: &HashSet<String>,
+    error_stack_vars: &HashSet<String>,
     findings: &mut Vec<Finding>,
 ) {
     let Some(func) = call_function(node) else {
@@ -134,6 +141,16 @@ fn check_call(
     let Some(args) = call_arguments(node) else {
         return;
     };
+
+    // `<obj>.<matchMethod>(...)` where <obj> is a stack string — direct
+    // (`new Error().stack.includes(...)`) or via a const bound earlier in
+    // the file (`const s = new Error().stack || ''; s.includes(...)`).
+    // Reading `.stack` is fine on its own (loggers do it); the tell is
+    // matching its content, which is how anti-analysis detects test or
+    // tracing runners by their frames.
+    if check_error_stack_match(node, func, bytes, path, index, error_stack_vars, findings) {
+        return;
+    }
 
     // Tagged template literal — `tag\`...\`` parses as a call_expression
     // whose arguments node is the template_string itself. Route those
@@ -926,6 +943,181 @@ fn enclosing_generator_name(node: Node, bytes: &[u8]) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// error-stack-inspection — `new Error().stack` is read and string-matched.
+// ---------------------------------------------------------------------------
+//
+// The structural pattern: an Error stack is materialized (`new Error().stack`,
+// either inline or bound through a `const`/`let` initializer that may include
+// a `|| ''` / `?? ''` fallback) and then a string-match method is invoked on
+// it. Reading the stack is benign on its own — loggers and error reporters
+// all do it. The tell is the *match step*: anti-analysis code checks the
+// stack for fingerprints of test runners, tracing tools, or sandboxes
+// (`jest`, `mocha`, `ts-node`, `playwright`, `puppeteer`, `node_modules/...`)
+// and gates the payload behind whether those frames are present. The shape
+// is what's diagnostic; the matched literal can be anything.
+
+fn check_error_stack_match(
+    node: Node,
+    func: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    error_stack_vars: &HashSet<String>,
+    findings: &mut Vec<Finding>,
+) -> bool {
+    if func.kind() != "member_expression" {
+        return false;
+    }
+    let Some(prop) = func.child_by_field_name("property") else {
+        return false;
+    };
+    if !is_string_match_method(node_text(prop, bytes)) {
+        return false;
+    }
+    let Some(obj) = func.child_by_field_name("object") else {
+        return false;
+    };
+    let receiver_is_stack = match obj.kind() {
+        "identifier" => error_stack_vars.contains(node_text(obj, bytes)),
+        _ => expression_is_error_stack(obj, bytes),
+    };
+    if !receiver_is_stack {
+        return false;
+    }
+    push(
+        findings,
+        node,
+        bytes,
+        path,
+        index,
+        SignalKind::ErrorStackInspection,
+        Severity::Warn,
+        0.85,
+        format!(
+            "`{}` called on `new Error().stack` — string-matching the call stack is the structural shape of sandbox/analyzer detection",
+            node_text(prop, bytes)
+        ),
+    );
+    true
+}
+
+fn is_string_match_method(name: &str) -> bool {
+    matches!(
+        name,
+        "includes"
+            | "indexOf"
+            | "lastIndexOf"
+            | "search"
+            | "match"
+            | "matchAll"
+            | "startsWith"
+            | "endsWith"
+            | "test"
+    )
+}
+
+/// Returns true if `node` is — or transparently wraps — a `.stack` access on
+/// a freshly constructed `Error`. Walks through `||`/`??` fallbacks and
+/// parenthesized expressions; does not follow identifiers (the caller
+/// resolves those through `error_stack_vars`).
+fn expression_is_error_stack(node: Node, bytes: &[u8]) -> bool {
+    match node.kind() {
+        "member_expression" => {
+            let Some(prop) = node.child_by_field_name("property") else {
+                return false;
+            };
+            if node_text(prop, bytes) != "stack" {
+                return false;
+            }
+            let Some(obj) = node.child_by_field_name("object") else {
+                return false;
+            };
+            is_new_error_expression(obj, bytes)
+        }
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() != "(" && child.kind() != ")" {
+                    return expression_is_error_stack(child, bytes);
+                }
+            }
+            false
+        }
+        "binary_expression" => {
+            let op = node
+                .child_by_field_name("operator")
+                .map(|n| node_text(n, bytes))
+                .unwrap_or("");
+            if op != "||" && op != "??" {
+                return false;
+            }
+            let l = node.child_by_field_name("left");
+            let r = node.child_by_field_name("right");
+            l.map(|n| expression_is_error_stack(n, bytes))
+                .unwrap_or(false)
+                || r.map(|n| expression_is_error_stack(n, bytes))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Returns true if `node` is `new Error()` or `new <SubclassOfError>()` —
+/// detected by the constructor name ending in `Error`. This catches custom
+/// error classes (`new MyError()`) without needing a class-graph walk.
+fn is_new_error_expression(node: Node, bytes: &[u8]) -> bool {
+    if node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() != "(" && child.kind() != ")" {
+                return is_new_error_expression(child, bytes);
+            }
+        }
+        return false;
+    }
+    if node.kind() != "new_expression" {
+        return false;
+    }
+    let Some(ctor) = new_constructor(node) else {
+        return false;
+    };
+    match ctor.kind() {
+        "identifier" => {
+            let name = node_text(ctor, bytes);
+            name == "Error" || name.ends_with("Error")
+        }
+        _ => false,
+    }
+}
+
+/// Collect names of `const`/`let` bindings whose initializer resolves to a
+/// `new Error().stack` access (possibly through a `||`/`??` fallback or a
+/// parenthesized wrapping). Lets the call-site check resolve indirect uses
+/// like `const s = new Error().stack || ''; s.includes('jest')`.
+fn collect_error_stack_vars(root: Node, bytes: &[u8]) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "variable_declarator" {
+            if let (Some(name_node), Some(value)) = (
+                node.child_by_field_name("name"),
+                node.child_by_field_name("value"),
+            ) {
+                if name_node.kind() == "identifier" && expression_is_error_stack(value, bytes) {
+                    names.insert(node_text(name_node, bytes).to_string());
+                }
+            }
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+    names
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1352,6 +1544,56 @@ mod tests {
             .find(|x| x.kind == SignalKind::GeneratorYieldCallable)
             .expect("expected GeneratorYieldCallable");
         assert!(hit.message.contains("dispatcher"));
+    }
+
+    #[test]
+    fn error_stack_inspection_via_const_includes_is_warn() {
+        let src = b"function isAnalyzed() {\n    const stack = new Error().stack || '';\n    return stack.includes('jest');\n}\n";
+        let f = run(src);
+        let hit = f
+            .iter()
+            .find(|x| x.kind == SignalKind::ErrorStackInspection)
+            .expect("expected ErrorStackInspection");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("includes"));
+    }
+
+    #[test]
+    fn error_stack_inspection_direct_chain_is_warn() {
+        let f = run(b"const hit = new Error().stack.includes('mocha');\n");
+        assert!(f
+            .iter()
+            .any(|x| x.kind == SignalKind::ErrorStackInspection && x.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn error_stack_inspection_via_indexof_is_warn() {
+        let src = b"const s = new Error().stack;\nif (s.indexOf('ts-node') !== -1) { /* ... */ }\n";
+        let f = run(src);
+        assert!(f.iter().any(|x| x.kind == SignalKind::ErrorStackInspection));
+    }
+
+    #[test]
+    fn error_stack_inspection_subclass_constructor_is_warn() {
+        // `new MyError().stack.includes(...)` — custom Error subclasses
+        // expose the same `.stack` property and are equally diagnostic.
+        let f = run(b"const hit = new MyError().stack.includes('cypress');\n");
+        assert!(f.iter().any(|x| x.kind == SignalKind::ErrorStackInspection));
+    }
+
+    #[test]
+    fn error_stack_read_without_match_is_ignored() {
+        // Reading and forwarding the stack — what loggers and reporters do
+        // — does not fire. Only the match step is diagnostic.
+        let f = run(b"const stack = new Error().stack;\nreport(stack);\n");
+        assert!(f.iter().all(|x| x.kind != SignalKind::ErrorStackInspection));
+    }
+
+    #[test]
+    fn includes_on_unrelated_string_is_ignored() {
+        // `.includes` on a regular string must not fire.
+        let f = run(b"const s = 'hello world';\nreturn s.includes('world');\n");
+        assert!(f.iter().all(|x| x.kind != SignalKind::ErrorStackInspection));
     }
 
     #[test]
