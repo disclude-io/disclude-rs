@@ -542,10 +542,9 @@ fn check_python_shellout(
     };
 
     let shape = match qualified.as_str() {
-        "os.system"
-        | "os.popen"
-        | "subprocess.getoutput"
-        | "subprocess.getstatusoutput" => PyShellShape::AlwaysShell,
+        "os.system" | "os.popen" | "subprocess.getoutput" | "subprocess.getstatusoutput" => {
+            PyShellShape::AlwaysShell
+        }
         "subprocess.run"
         | "subprocess.call"
         | "subprocess.check_call"
@@ -581,7 +580,10 @@ fn check_python_shellout(
     } else if is_literal {
         let body = match shape {
             PyShellShape::ConditionalShell => {
-                format!("`{}` called with `shell=True` and a literal command", qualified)
+                format!(
+                    "`{}` called with `shell=True` and a literal command",
+                    qualified
+                )
             }
             PyShellShape::Spawn => {
                 format!("`{}` called with a literal binary path", qualified)
@@ -2052,8 +2054,10 @@ mod tests {
         // injection surface. Don't fire.
         let src = b"import subprocess\nsubprocess.run([\"ls\", \"-la\"])\n";
         let findings = run(src);
-        assert!(findings.iter().all(|f| !(f.kind == SignalKind::DynamicExecution
-            && f.message.contains("subprocess.run"))));
+        assert!(findings
+            .iter()
+            .all(|f| !(f.kind == SignalKind::DynamicExecution
+                && f.message.contains("subprocess.run"))));
     }
 
     #[test]
@@ -2061,7 +2065,9 @@ mod tests {
         let src = b"import subprocess\nsubprocess.run(cmd, shell=True)\n";
         let hit = run(src)
             .into_iter()
-            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("subprocess.run"))
+            .find(|f| {
+                f.kind == SignalKind::DynamicExecution && f.message.contains("subprocess.run")
+            })
             .expect("expected DynamicExecution for subprocess.run");
         assert_eq!(hit.severity, Severity::Critical);
     }
@@ -2071,7 +2077,9 @@ mod tests {
         let src = b"import subprocess\nsubprocess.run(\"ls -la\", shell=True)\n";
         let hit = run(src)
             .into_iter()
-            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("subprocess.run"))
+            .find(|f| {
+                f.kind == SignalKind::DynamicExecution && f.message.contains("subprocess.run")
+            })
             .expect("expected DynamicExecution for subprocess.run literal");
         assert_eq!(hit.severity, Severity::Warn);
     }
@@ -2082,8 +2090,9 @@ mod tests {
         let src = b"import subprocess\nsubprocess.getoutput(cmd)\n";
         let hit = run(src)
             .into_iter()
-            .find(|f| f.kind == SignalKind::DynamicExecution
-                && f.message.contains("subprocess.getoutput"))
+            .find(|f| {
+                f.kind == SignalKind::DynamicExecution && f.message.contains("subprocess.getoutput")
+            })
             .expect("expected DynamicExecution for subprocess.getoutput");
         assert_eq!(hit.severity, Severity::Critical);
     }
@@ -2093,8 +2102,10 @@ mod tests {
         // shell=False explicitly (or default) → no fire.
         let src = b"import subprocess\nsubprocess.check_output([\"ls\"], shell=False)\n";
         let findings = run(src);
-        assert!(findings.iter().all(|f| !(f.kind == SignalKind::DynamicExecution
-            && f.message.contains("subprocess.check_output"))));
+        assert!(findings
+            .iter()
+            .all(|f| !(f.kind == SignalKind::DynamicExecution
+                && f.message.contains("subprocess.check_output"))));
     }
 
     #[test]
@@ -2124,8 +2135,9 @@ mod tests {
     fn os_spawn_family_is_detected() {
         let src = b"import os\nos.spawnl(os.P_WAIT, path, arg0)\n";
         let findings = run(src);
-        assert!(findings.iter().any(|f| f.kind == SignalKind::DynamicExecution
-            && f.message.contains("os.spawnl")));
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("os.spawnl")));
     }
 
     #[test]
@@ -2133,7 +2145,8 @@ mod tests {
         // `mylib.system(x)` — not the os.system builtin, must not fire.
         let src = b"import mylib\nmylib.system(cmd)\n";
         let findings = run(src);
-        assert!(findings.iter().all(|f| !(f.kind == SignalKind::DynamicExecution
-            && f.message.contains("system"))));
+        assert!(findings
+            .iter()
+            .all(|f| !(f.kind == SignalKind::DynamicExecution && f.message.contains("system"))));
     }
 }
