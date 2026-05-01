@@ -61,6 +61,7 @@ pub enum SignalKind {
     ProxyGlobalHijack,
     TagFunctionDeobfuscator,
     DataUriImport,
+    GeneratorYieldCallable,
 }
 
 impl SignalKind {
@@ -109,6 +110,7 @@ impl SignalKind {
             SignalKind::ProxyGlobalHijack => "proxy-global-hijack",
             SignalKind::TagFunctionDeobfuscator => "tag-function-deobfuscator",
             SignalKind::DataUriImport => "data-uri-import",
+            SignalKind::GeneratorYieldCallable => "generator-yield-callable",
         }
     }
 }

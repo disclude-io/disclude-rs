@@ -104,6 +104,7 @@ fn walk(
                 findings,
             ),
             "new_expression" => check_new(node, bytes, path, index, findings),
+            "yield_expression" => check_yield(node, bytes, path, index, findings),
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
@@ -839,6 +840,92 @@ fn body_has_decode_op(body: Node, bytes: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// yield_expression — generator yielding a callable.
+// ---------------------------------------------------------------------------
+//
+// `function* g() { yield () => os.read(...); yield m => m.run(); }` is the
+// generator-as-state-machine deobfuscator: the dispatch function is split
+// across multiple `yield` returns, each producing a callable. The driver
+// pulls them out with `g.next().value` and invokes them. Reviewers see two
+// short lambdas; the actual control flow is reconstructed at runtime by
+// whoever owns the generator object. Yielding *data* values is fine; what
+// makes the shape suspicious is that what comes out of `next().value` is
+// itself a function to call.
+
+fn check_yield(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(value) = yield_value(node) else {
+        return;
+    };
+    if !matches!(value.kind(), "arrow_function" | "function_expression") {
+        return;
+    }
+    let gen_name = enclosing_generator_name(node, bytes).unwrap_or_else(|| "<anonymous>".into());
+    push(
+        findings,
+        node,
+        bytes,
+        path,
+        index,
+        SignalKind::GeneratorYieldCallable,
+        Severity::Warn,
+        0.80,
+        format!(
+            "generator `{}` yields a callable — `next().value()` invokes the yielded function (state-machine pattern)",
+            gen_name
+        ),
+    );
+}
+
+/// Find the value expression of a `yield_expression`. Children are `yield`
+/// (and optionally `*` for `yield*`) followed by the value, when present.
+fn yield_value(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "yield" | "*" => continue,
+            _ => return Some(child),
+        }
+    }
+    None
+}
+
+/// Walk parents to find the enclosing generator and return its name. For
+/// anonymous generator expressions, fall back to the variable name when
+/// the generator is the initializer of a `variable_declarator`.
+fn enclosing_generator_name(node: Node, bytes: &[u8]) -> Option<String> {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "generator_function_declaration" => {
+                if let Some(name_node) = n.child_by_field_name("name") {
+                    return Some(node_text(name_node, bytes).to_string());
+                }
+                return None;
+            }
+            "generator_function" => {
+                if let Some(p) = n.parent() {
+                    if p.kind() == "variable_declarator" {
+                        if let Some(name_node) = p.child_by_field_name("name") {
+                            return Some(node_text(name_node, bytes).to_string());
+                        }
+                    }
+                }
+                return None;
+            }
+            _ => {}
+        }
+        cur = n.parent();
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1201,6 +1288,69 @@ mod tests {
         assert!(f
             .iter()
             .any(|x| x.kind == SignalKind::DynamicImport && x.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn generator_yields_arrow_is_warn() {
+        let src = b"function* g() {\n    yield () => doThing();\n}\n";
+        let f = run(src);
+        let hit = f
+            .iter()
+            .find(|x| x.kind == SignalKind::GeneratorYieldCallable)
+            .expect("expected GeneratorYieldCallable");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("`g`"));
+    }
+
+    #[test]
+    fn generator_yields_function_expression_is_warn() {
+        let src = b"function* g() {\n    yield function () { return 1; };\n}\n";
+        let f = run(src);
+        assert!(f.iter().any(
+            |x| x.kind == SignalKind::GeneratorYieldCallable && x.severity == Severity::Warn
+        ));
+    }
+
+    #[test]
+    fn generator_yields_data_is_ignored() {
+        let src = b"function* g() {\n    yield 1;\n    yield { stage: 'a' };\n    yield 'literal';\n}\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .all(|x| x.kind != SignalKind::GeneratorYieldCallable));
+    }
+
+    #[test]
+    fn generator_yields_call_result_is_ignored() {
+        // `yield call(fn, args)` (redux-saga shape) yields the *return value*
+        // of `call`, not a function. Must not fire.
+        let src = b"function* g() {\n    yield call(fn, x);\n}\n";
+        let f = run(src);
+        assert!(f
+            .iter()
+            .all(|x| x.kind != SignalKind::GeneratorYieldCallable));
+    }
+
+    #[test]
+    fn generator_multiple_callable_yields_each_fire() {
+        let src = b"function* g() {\n    yield () => a();\n    yield (m) => m.b();\n}\n";
+        let f = run(src);
+        let hits = f
+            .iter()
+            .filter(|x| x.kind == SignalKind::GeneratorYieldCallable)
+            .count();
+        assert_eq!(hits, 2);
+    }
+
+    #[test]
+    fn generator_expression_via_const_uses_var_name() {
+        let src = b"const dispatcher = function* () { yield () => x(); };\n";
+        let f = run(src);
+        let hit = f
+            .iter()
+            .find(|x| x.kind == SignalKind::GeneratorYieldCallable)
+            .expect("expected GeneratorYieldCallable");
+        assert!(hit.message.contains("dispatcher"));
     }
 
     #[test]

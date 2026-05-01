@@ -191,6 +191,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::ProxyGlobalHijack,
     SignalKind::TagFunctionDeobfuscator,
     SignalKind::DataUriImport,
+    SignalKind::GeneratorYieldCallable,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -238,6 +239,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::ProxyGlobalHijack => "ProxyGlobalHijack",
         SignalKind::TagFunctionDeobfuscator => "TagFunctionDeobfuscator",
         SignalKind::DataUriImport => "DataUriImport",
+        SignalKind::GeneratorYieldCallable => "GeneratorYieldCallable",
     }
 }
 
@@ -327,6 +329,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::DataUriImport => {
             "`import()` specifier is a `data:` URI — executes arbitrary code without touching disk"
+        }
+        SignalKind::GeneratorYieldCallable => {
+            "Generator (`function*`) yields callables — state-machine deobfuscator pattern"
         }
     }
 }

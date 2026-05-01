@@ -780,6 +780,46 @@ fn typescript_dynamic_import_fixture_emits_data_uri_import_critical() {
 }
 
 #[test]
+fn typescript_generators_fixture_emits_generator_yield_callable() {
+    // generators.ts defines `function* dispatcher()` that yields two
+    // arrow functions; the driver pulls each out with `g.next().value!()`
+    // to invoke them. Detection must fire on each callable yield and
+    // name the enclosing generator in the message.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/generators.ts")
+        })
+        .expect("typescript/generators.ts fixture was scanned");
+    let hits: Vec<_> = file
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::GeneratorYieldCallable)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        2,
+        "expected 2 GeneratorYieldCallable findings (one per yield), got {:?}",
+        file.findings
+    );
+    for h in &hits {
+        assert_eq!(h.severity, disclude::finding::Severity::Warn);
+        assert!(
+            h.message.contains("dispatcher"),
+            "expected message to name the generator, got: {}",
+            h.message
+        );
+    }
+    let lines: Vec<usize> = hits.iter().map(|h| h.line).collect();
+    assert!(lines.contains(&5), "expected hit on yield line 5, got {:?}", lines);
+    assert!(lines.contains(&10), "expected hit on yield line 10, got {:?}", lines);
+}
+
+#[test]
 fn typescript_template_fixture_emits_tag_function_deobfuscator() {
     // template.ts defines a tag function `r` that reverses each
     // template-string segment, then uses `` r`...` `` to materialize the
