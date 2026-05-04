@@ -1462,6 +1462,36 @@ fn bash_wget_exec_fixture_emits_dynamic_exec_critical() {
 }
 
 #[test]
+fn bash_env_var_fixture_emits_destructive_payload_and_eval() {
+    // env_var.sh stores "rm -rf /" in an env var, then eval's it.
+    // Two CRITICAL findings must fire:
+    //   1. DestructiveCommandPayload on the string literal (line 2)
+    //   2. DynamicExecution on the eval (line 4)
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/env_var.sh"))
+        .expect("bash/env_var.sh fixture was scanned");
+
+    let payload = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DestructiveCommandPayload)
+        .expect("expected DestructiveCommandPayload on bash/env_var.sh");
+    assert_eq!(payload.severity, disclude::finding::Severity::Critical);
+    assert_eq!(payload.line, 2, "finding should anchor on the string literal");
+
+    let dynx = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution)
+        .expect("expected DynamicExecution on bash/env_var.sh");
+    assert_eq!(dynx.severity, disclude::finding::Severity::Critical);
+    assert_eq!(dynx.line, 4, "finding should anchor on the eval call");
+}
+
+#[test]
 fn bash_ifs_escapes_fixture_emits_obfuscated_command_and_ifs() {
     // ifs_escapes.sh demonstrates two obfuscation techniques:
     //   1. `\b\i\n/\n\c -e /\b\i\n/s\h` — every char backslash-quoted to hide /bin/nc

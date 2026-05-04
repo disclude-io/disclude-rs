@@ -80,6 +80,9 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
             "pipeline" => check_pipeline(node, bytes, path, index, findings),
             "function_definition" => check_function_shadow(node, bytes, path, index, findings),
             "variable_assignment" => check_ifs_manipulation(node, bytes, path, index, findings),
+            "string" | "raw_string" => {
+                check_destructive_string(node, bytes, path, index, findings)
+            }
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
@@ -164,7 +167,21 @@ fn check_eval_arg(
             diff_introduced: false,
         });
     } else {
-        // Literal string passed to eval — still a code-execution risk.
+        // Literal string passed to eval — elevate to Critical if the literal
+        // contains a known-destructive command, otherwise Warn.
+        let literal_text = node_text(arg, bytes);
+        let (severity, message) =
+            if let Some((_needle, label)) = find_destructive_pattern(literal_text) {
+                (
+                    Severity::Critical,
+                    format!("`eval` called on a literal containing {}", label),
+                )
+            } else {
+                (
+                    Severity::Warn,
+                    "`eval` called on a string literal".to_string(),
+                )
+            };
         let off = cmd_node.start_byte();
         let (line, col) = index.locate(off);
         findings.push(Finding {
@@ -174,9 +191,9 @@ fn check_eval_arg(
             col,
             pass: PassKind::Ast,
             kind: SignalKind::DynamicExecution,
-            severity: Severity::Warn,
-            confidence: 0.70,
-            message: "`eval` called on a string literal".to_string(),
+            severity,
+            confidence: 0.85,
+            message,
             snippet: redact_snippet(&snippet_around(bytes, off, 100)),
             diff_introduced: false,
         });
@@ -231,6 +248,36 @@ fn emit_dynamic_source(
         confidence: 0.75,
         message: "`source` called with a dynamic path — sourcing a variable script path"
             .to_string(),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+/// Emit `DestructiveCommandPayload` when a string or raw-string literal
+/// contains a known-dangerous shell command pattern.
+fn check_destructive_string(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let text = node_text(node, bytes);
+    let Some((_needle, label)) = find_destructive_pattern(text) else {
+        return;
+    };
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::DestructiveCommandPayload,
+        severity: Severity::Critical,
+        confidence: 0.92,
+        message: format!("string literal contains {}", label),
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
@@ -406,6 +453,31 @@ fn check_shell_c_flag(
 /// Shell interpreters that, when appearing as the last command of a pipeline,
 /// indicate the piped data is being executed as code.
 const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "dash", "zsh", "ksh"];
+
+/// Substrings that, when found inside a string literal, indicate the string
+/// contains a destructive shell command payload.  Each entry is a
+/// (needle, label) pair: `needle` is matched literally (case-sensitive, as
+/// bash commands are case-sensitive), `label` is used in the finding message.
+const DESTRUCTIVE_PATTERNS: &[(&str, &str)] = &[
+    ("rm -rf /", "recursive root deletion (rm -rf /)"),
+    ("rm -fr /", "recursive root deletion (rm -fr /)"),
+    ("rm -rf ~/", "recursive home deletion (rm -rf ~/)"),
+    ("rm -fr ~/", "recursive home deletion (rm -fr ~/)"),
+    ("dd if=/dev/zero of=/dev/", "disk wipe via dd"),
+    ("dd if=/dev/urandom of=/dev/", "disk wipe via dd"),
+    (":(){:|:&};:", "fork bomb"),
+];
+
+/// Returns `Some((needle, label))` if `text` contains a known-destructive
+/// shell command pattern, `None` otherwise.
+fn find_destructive_pattern(text: &str) -> Option<(&'static str, &'static str)> {
+    for &(needle, label) in DESTRUCTIVE_PATTERNS {
+        if text.contains(needle) {
+            return Some((needle, label));
+        }
+    }
+    None
+}
 
 /// Commands where a same-named shell function definition is a strong indicator
 /// of credential theft or supply-chain tampering.
@@ -698,6 +770,44 @@ mod tests {
             .find(|f| f.kind == SignalKind::DynamicExecution)
             .expect("expected DynamicExecution finding");
         assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn eval_of_destructive_literal_is_critical() {
+        let findings = run(b"eval \"rm -rf /\"\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution)
+            .expect("expected DynamicExecution finding");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(
+            hit.message.contains("rm -rf /"),
+            "message should cite the destructive pattern, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn string_literal_with_rm_rf_root_fires_destructive_payload() {
+        // The string itself should be flagged independent of whether it is eval'd.
+        let findings = run(b"CMD=\"rm -rf /\"\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DestructiveCommandPayload)
+            .expect("expected DestructiveCommandPayload finding");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("rm -rf /"));
+    }
+
+    #[test]
+    fn benign_string_does_not_fire_destructive_payload() {
+        let findings = run(b"MSG=\"hello world\"\n");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::DestructiveCommandPayload),
+            "benign string should not trigger DestructiveCommandPayload"
+        );
     }
 
     #[test]

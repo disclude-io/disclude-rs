@@ -196,6 +196,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::FunctionShadowing,
     SignalKind::ObfuscatedCommandName,
     SignalKind::IfsManipulation,
+    SignalKind::DestructiveCommandPayload,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -248,6 +249,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::FunctionShadowing => "FunctionShadowing",
         SignalKind::ObfuscatedCommandName => "ObfuscatedCommandName",
         SignalKind::IfsManipulation => "IfsManipulation",
+        SignalKind::DestructiveCommandPayload => "DestructiveCommandPayload",
     }
 }
 
@@ -353,6 +355,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::IfsManipulation => {
             "`IFS` set to a non-whitespace separator — enables word-splitting of variable expansions into command arguments"
         }
+        SignalKind::DestructiveCommandPayload => {
+            "String literal contains a known-destructive shell command (e.g. rm -rf /, dd disk wipe)"
+        }
     }
 }
 
@@ -368,7 +373,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::ProxyGlobalHijack
         | SignalKind::TagFunctionDeobfuscator
         | SignalKind::DataUriImport
-        | SignalKind::FunctionShadowing => Severity::Critical,
+        | SignalKind::FunctionShadowing
+        | SignalKind::DestructiveCommandPayload => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

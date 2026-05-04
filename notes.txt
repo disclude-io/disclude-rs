@@ -7,3 +7,11 @@ Note:
 
 https://aws.amazon.com/blogs/security/defending-llm-applications-against-unicode-character-smuggling/
 
+
+
+On Glassworm:
+https://www.scientificamerican.com/article/glassworm-malware-hides-in-invisible-open-source-code/
+
+
+Trojan Source: Invisible Vulnerabilties
+https://www.usenix.org/system/files/sec23fall-prepub-151-boucher.pdf

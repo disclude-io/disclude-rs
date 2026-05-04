@@ -66,6 +66,7 @@ pub enum SignalKind {
     FunctionShadowing,
     ObfuscatedCommandName,
     IfsManipulation,
+    DestructiveCommandPayload,
 }
 
 impl SignalKind {
@@ -119,6 +120,7 @@ impl SignalKind {
             SignalKind::FunctionShadowing => "function-shadowing",
             SignalKind::ObfuscatedCommandName => "obfuscated-command-name",
             SignalKind::IfsManipulation => "ifs-manipulation",
+            SignalKind::DestructiveCommandPayload => "destructive-command-payload",
         }
     }
 }
