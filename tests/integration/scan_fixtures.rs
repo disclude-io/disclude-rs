@@ -1772,3 +1772,28 @@ fn bash_arithmetic_char_fixture_emits_dynamic_execution_critical() {
         })
         .expect("expected CRITICAL DynamicExecution on bash/arithmetic_char.sh");
 }
+
+#[test]
+fn bash_path_hijack_fixture_emits_path_command_shadow_critical() {
+    // Prepends /tmp to PATH and writes a fake `ls` binary there, so that
+    // running `ls` triggers the attacker-controlled payload.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/path_hijack.sh"))
+        .expect("bash/path_hijack.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::PathCommandShadow
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL PathCommandShadow on bash/path_hijack.sh");
+    assert!(
+        hit.message.contains("ls"),
+        "expected message to identify `ls` as the shadowed command, got: {}",
+        hit.message
+    );
+}

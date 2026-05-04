@@ -198,6 +198,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::IfsManipulation,
     SignalKind::DestructiveCommandPayload,
     SignalKind::BashDevTcpSocket,
+    SignalKind::PathCommandShadow,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -252,6 +253,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::IfsManipulation => "IfsManipulation",
         SignalKind::DestructiveCommandPayload => "DestructiveCommandPayload",
         SignalKind::BashDevTcpSocket => "BashDevTcpSocket",
+        SignalKind::PathCommandShadow => "PathCommandShadow",
     }
 }
 
@@ -363,6 +365,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::BashDevTcpSocket => {
             "Bash /dev/tcp or /dev/udp pseudo-device used to open a covert network socket without any external binary"
         }
+        SignalKind::PathCommandShadow => {
+            "A redirect writes to a file whose name matches a system command, consistent with PATH hijacking to shadow the real binary"
+        }
     }
 }
 
@@ -380,7 +385,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::DataUriImport
         | SignalKind::FunctionShadowing
         | SignalKind::DestructiveCommandPayload
-        | SignalKind::BashDevTcpSocket => Severity::Critical,
+        | SignalKind::BashDevTcpSocket
+        | SignalKind::PathCommandShadow => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

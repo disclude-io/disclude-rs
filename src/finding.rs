@@ -68,6 +68,7 @@ pub enum SignalKind {
     IfsManipulation,
     DestructiveCommandPayload,
     BashDevTcpSocket,
+    PathCommandShadow,
 }
 
 impl SignalKind {
@@ -123,6 +124,7 @@ impl SignalKind {
             SignalKind::IfsManipulation => "ifs-manipulation",
             SignalKind::DestructiveCommandPayload => "destructive-command-payload",
             SignalKind::BashDevTcpSocket => "bash-dev-tcp-socket",
+            SignalKind::PathCommandShadow => "path-command-shadow",
         }
     }
 }

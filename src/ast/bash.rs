@@ -85,6 +85,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
                 check_dev_tcp(node, bytes, path, index, findings);
             }
             "word" | "concatenation" => check_dev_tcp(node, bytes, path, index, findings),
+            "file_redirect" => check_redirect_command_shadow(node, bytes, path, index, findings),
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
@@ -540,6 +541,69 @@ fn find_destructive_pattern(text: &str) -> Option<(&'static str, &'static str)> 
         }
     }
     None
+}
+
+/// Commands where a redirect that writes to a same-named file is a strong
+/// indicator of PATH hijacking — the attacker drops a fake binary into a
+/// writable directory that shadows the real command when PATH is modified.
+/// Extends SHADOW_WATCHLIST with common system utilities used as decoys.
+const FILE_SHADOW_COMMANDS: &[&str] = &[
+    // common system utilities used as PATH hijack decoys
+    "ls", "cat", "id", "whoami", "env", "sh", "bash", "dash", "zsh", "which",
+    // privilege / authentication
+    "sudo", "su", "doas", "passwd", "login",
+    // remote access / crypto
+    "ssh", "scp", "sftp", "gpg", "gpg2",
+    // network fetchers
+    "curl", "wget", "nc", "netcat",
+    // package managers
+    "pip", "pip3", "pip3.11", "npm", "yarn", "pnpm", "gem", "cargo",
+    "apt", "apt-get", "yum", "dnf", "brew", "pacman", "apk",
+    // language runtimes / version control
+    "python", "python3", "node", "ruby", "perl", "php", "git",
+];
+
+/// Detect redirect to a file whose basename matches a system command — the
+/// canonical PATH hijacking setup where a fake binary shadows the real one.
+fn check_redirect_command_shadow(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    // The redirect destination is always the last child of file_redirect.
+    let count = node.child_count();
+    if count == 0 {
+        return;
+    }
+    let Some(dest) = node.child((count - 1) as u32) else {
+        return;
+    };
+    let dest_text = node_text(dest, bytes);
+    // Extract the final path component (basename).
+    let basename = dest_text.rsplit('/').next().unwrap_or(dest_text);
+    if !FILE_SHADOW_COMMANDS.contains(&basename) {
+        return;
+    }
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::PathCommandShadow,
+        severity: Severity::Critical,
+        confidence: 0.88,
+        message: format!(
+            "redirect writes to `{}` — filename matches a system command (PATH hijack setup)",
+            basename
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
 }
 
 /// Commands where a same-named shell function definition is a strong indicator
