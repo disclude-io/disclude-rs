@@ -54,7 +54,11 @@ impl LLMProvider {
 
     fn defaults(&self) -> (&'static str, &'static str, &'static str) {
         match self {
-            LLMProvider::Anthropic => ("claude-haiku-4-5", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+            LLMProvider::Anthropic => (
+                "claude-haiku-4-5",
+                "https://api.anthropic.com",
+                "ANTHROPIC_API_KEY",
+            ),
             LLMProvider::OpenAI => ("gpt-4o-mini", "https://api.openai.com", "OPENAI_API_KEY"),
             LLMProvider::Ollama => ("llama3.2", "https://api.ollama.ai", "OLLAMA_API_KEY"),
         }
@@ -149,16 +153,7 @@ pub fn review_scan(result: &ScanResult, config: &LLMConfig) -> anyhow::Result<LL
         return Ok(HashMap::new());
     }
 
-    let system = "You are a security expert reviewing findings from disclude, a supply-chain \
-                  attack scanner. disclude runs three analysis passes: (1) raw: byte-level \
-                  patterns such as unicode anomalies, encoded blobs, and high-entropy strings; \
-                  (2) token: identifier and string-construction patterns such as concatenated \
-                  sensitive names or macro redefinitions; (3) ast: semantic patterns such as \
-                  dynamic execution, shell calls, and encoded dropper pipelines. Raw findings \
-                  have a higher false-positive rate than AST findings. For each finding you \
-                  receive, determine whether it represents genuine obfuscation or malicious \
-                  intent versus a legitimate coding pattern. Consider the pass type, signal, \
-                  snippet, and file context.";
+    let system = "You are a security expert reviewing findings from disclude, a code obfuscation and supply-chain attack scanner. disclude runs three analysis passes: (1) raw: byte-level patterns such as unicode anomalies, encoded blobs, and high-entropy strings; (2) token: identifier and string-construction patterns such as concatenated sensitive names or macro redefinitions; (3) ast: semantic patterns such as dynamic execution, shell calls, and encoded dropper pipelines. Raw findings have a higher false-positive rate than AST findings. For each finding you receive, determine whether it represents genuine obfuscation or malicious intent versus a legitimate coding pattern. Consider the pass type, signal, snippet, and file context.";
 
     let mut review: LLMReview = HashMap::new();
     for batch in &batches {
@@ -170,9 +165,7 @@ pub fn review_scan(result: &ScanResult, config: &LLMConfig) -> anyhow::Result<LL
         let user = build_prompt(&result.root, batch);
         let raw = match &config.provider {
             LLMProvider::Anthropic => call_anthropic(system, &user, config)?,
-            LLMProvider::OpenAI | LLMProvider::Ollama => {
-                call_openai_compat(system, &user, config)?
-            }
+            LLMProvider::OpenAI | LLMProvider::Ollama => call_openai_compat(system, &user, config)?,
         };
 
         for (key, verdict) in parse_response(&raw, &id_map) {
@@ -192,10 +185,7 @@ pub fn build_batches(result: &ScanResult) -> Vec<Vec<(FindingKey, Finding, Langu
             if f.severity < Severity::Warn {
                 continue;
             }
-            let sz = f.path.to_string_lossy().len()
-                + f.message.len()
-                + f.snippet.len()
-                + 128;
+            let sz = f.path.to_string_lossy().len() + f.message.len() + f.snippet.len() + 128;
             if !current.is_empty() && current_size + sz > BATCH_PAYLOAD_LIMIT {
                 batches.push(std::mem::take(&mut current));
                 current_size = 0;
@@ -213,9 +203,7 @@ pub fn build_batches(result: &ScanResult) -> Vec<Vec<(FindingKey, Finding, Langu
 pub fn build_prompt(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> String {
     let n = batch.len();
     let mut out = format!(
-        "Analyze the following {n} static-analysis findings from a source code security scan.\n\
-         For each finding, determine whether it represents a genuine supply-chain security\n\
-         concern or a false positive.\n\n"
+        "Analyze the following {n} findings from a disclude static-analysis security scan.\n For each finding, determine whether it represents a genuine code obfuscation security concern or a false positive.\n\n"
     );
 
     for (_key, f, lang) in batch {
@@ -252,11 +240,7 @@ pub fn build_prompt(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> S
     out
 }
 
-pub fn call_anthropic(
-    system: &str,
-    user: &str,
-    config: &LLMConfig,
-) -> anyhow::Result<String> {
+pub fn call_anthropic(system: &str, user: &str, config: &LLMConfig) -> anyhow::Result<String> {
     let url = format!("{}/v1/messages", config.base_url);
     let body = json!({
         "model": config.model,
@@ -285,11 +269,7 @@ pub fn call_anthropic(
         .to_string())
 }
 
-pub fn call_openai_compat(
-    system: &str,
-    user: &str,
-    config: &LLMConfig,
-) -> anyhow::Result<String> {
+pub fn call_openai_compat(system: &str, user: &str, config: &LLMConfig) -> anyhow::Result<String> {
     let url = format!("{}/v1/chat/completions", config.base_url);
     let body = json!({
         "model": config.model,

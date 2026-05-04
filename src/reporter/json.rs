@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::finding::{FileAnalysis, Finding, ScanResult, Severity};
-use crate::llm::{LLMReview, LLMVerdict, finding_key};
+use crate::llm::{finding_key, LLMReview, LLMVerdict};
 
 pub fn render(
     result: &ScanResult,

@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use serde_json::{json, Map, Value};
 
 use crate::finding::{Finding, ScanResult, Severity, SignalKind};
-use crate::llm::{LLMReview, finding_key};
+use crate::llm::{finding_key, LLMReview};
 
 const SARIF_VERSION: &str = "2.1.0";
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";

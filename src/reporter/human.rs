@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use crate::finding::{Finding, ScanResult, Severity};
-use crate::llm::{LLMReview, Verdict, finding_key};
+use crate::llm::{finding_key, LLMReview, Verdict};
 
 pub fn render(
     result: &ScanResult,
