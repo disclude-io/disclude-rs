@@ -3,8 +3,14 @@
 use std::io::{self, Write};
 
 use crate::finding::{Finding, ScanResult, Severity};
+use crate::llm::{finding_key, LLMReview, Verdict};
 
-pub fn render(result: &ScanResult, threshold: Severity, writer: &mut dyn Write) -> io::Result<()> {
+pub fn render(
+    result: &ScanResult,
+    threshold: Severity,
+    llm_review: Option<&LLMReview>,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
     let mut shown: Vec<&Finding> = result
         .files
         .iter()
@@ -40,6 +46,20 @@ pub fn render(result: &ScanResult, threshold: Severity, writer: &mut dyn Write) 
                 new_marker,
                 f.message,
             )?;
+            if let Some(review) = llm_review {
+                if let Some(v) = review.get(&finding_key(f)) {
+                    let label = verdict_label(v.verdict);
+                    writeln!(
+                        writer,
+                        "{:<10}llm [{}/{}  {:.0}%] {}",
+                        "",
+                        v.score,
+                        label,
+                        v.confidence * 100.0,
+                        v.summary,
+                    )?;
+                }
+            }
         }
         writeln!(writer)?;
     }
@@ -67,5 +87,15 @@ fn sev_label(s: Severity) -> &'static str {
         Severity::Critical => "CRITICAL",
         Severity::Warn => "WARN",
         Severity::Info => "INFO",
+    }
+}
+
+fn verdict_label(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Dismissed => "dismissed",
+        Verdict::LikelyBenign => "likely_benign",
+        Verdict::Inconclusive => "inconclusive",
+        Verdict::Suspicious => "suspicious",
+        Verdict::Confirmed => "confirmed",
     }
 }

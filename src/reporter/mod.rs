@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use crate::finding::{ScanResult, Severity};
+use crate::llm::LLMReview;
 
 pub mod human;
 pub mod json;
@@ -30,11 +31,12 @@ pub fn report(
     result: &ScanResult,
     threshold: Severity,
     format: OutputFormat,
+    llm_review: Option<&LLMReview>,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
     match format {
-        OutputFormat::Human => human::render(result, threshold, writer),
-        OutputFormat::Json => json::render(result, threshold, writer),
-        OutputFormat::Sarif => sarif::render(result, threshold, writer),
+        OutputFormat::Human => human::render(result, threshold, llm_review, writer),
+        OutputFormat::Json => json::render(result, threshold, llm_review, writer),
+        OutputFormat::Sarif => sarif::render(result, threshold, llm_review, writer),
     }
 }
