@@ -149,7 +149,11 @@ fn tag_char_name(c: char) -> String {
             format!("U+{:05X} TAG {:?}", cp, ascii)
         }
         0xFE00..=0xFE0F => {
-            format!("U+{:04X} VARIATION SELECTOR-{} (invisible payload carrier)", cp, cp - 0xFE00 + 1)
+            format!(
+                "U+{:04X} VARIATION SELECTOR-{} (invisible payload carrier)",
+                cp,
+                cp - 0xFE00 + 1
+            )
         }
         0xE0100..=0xE01EF => {
             format!("U+{:05X} VARIATION SELECTOR SUPPLEMENT (invisible payload carrier, encodes byte 0x{:02X})", cp, cp - 0xE0100 + 16)
