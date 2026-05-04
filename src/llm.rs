@@ -43,6 +43,33 @@ pub enum LLMProvider {
     Ollama,
 }
 
+impl LLMProvider {
+    pub fn name(&self) -> &'static str {
+        match self {
+            LLMProvider::Anthropic => "Anthropic",
+            LLMProvider::OpenAI => "OpenAI",
+            LLMProvider::Ollama => "Ollama",
+        }
+    }
+
+    fn defaults(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            LLMProvider::Anthropic => ("claude-haiku-4-5", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+            LLMProvider::OpenAI => ("gpt-4o-mini", "https://api.openai.com", "OPENAI_API_KEY"),
+            LLMProvider::Ollama => ("llama3.2", "https://api.ollama.ai", "OLLAMA_API_KEY"),
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "anthropic" => Some(LLMProvider::Anthropic),
+            "openai" => Some(LLMProvider::OpenAI),
+            "ollama" => Some(LLMProvider::Ollama),
+            _ => None,
+        }
+    }
+}
+
 pub struct LLMConfig {
     pub provider: LLMProvider,
     pub model: String,
@@ -52,11 +79,7 @@ pub struct LLMConfig {
 
 impl LLMConfig {
     pub fn provider_name(&self) -> &'static str {
-        match self.provider {
-            LLMProvider::Anthropic => "Anthropic",
-            LLMProvider::OpenAI => "OpenAI",
-            LLMProvider::Ollama => "Ollama",
-        }
+        self.provider.name()
     }
 }
 
@@ -65,7 +88,10 @@ pub fn finding_key(f: &Finding) -> FindingKey {
 }
 
 pub fn finding_id(root: &Path, f: &Finding) -> String {
-    let rel = f.path.strip_prefix(root).unwrap_or(&f.path);
+    let rel = match f.path.strip_prefix(root) {
+        Ok(p) if !p.as_os_str().is_empty() => p,
+        _ => &f.path,
+    };
     format!("{}:{}:{}", rel.display(), f.line, f.col)
 }
 
@@ -74,53 +100,20 @@ pub fn detect_provider(
     llm_model: Option<&str>,
     llm_base_url: Option<&str>,
 ) -> anyhow::Result<LLMConfig> {
-    let (pname, default_model, default_url, key_env) = match llm_provider {
-        Some("anthropic") => (
-            "anthropic",
-            "claude-sonnet-4-6",
-            "https://api.anthropic.com",
-            "ANTHROPIC_API_KEY",
-        ),
-        Some("openai") => (
-            "openai",
-            "gpt-4o-mini",
-            "https://api.openai.com",
-            "OPENAI_API_KEY",
-        ),
-        Some("ollama") => (
-            "ollama",
-            "llama3.2",
-            "https://api.ollama.ai",
-            "OLLAMA_API_KEY",
-        ),
-        Some(other) => {
-            anyhow::bail!(
+    let provider = match llm_provider {
+        Some(s) => LLMProvider::from_str(s).ok_or_else(|| {
+            anyhow::anyhow!(
                 "unknown --llm-provider '{}'; expected: anthropic, openai, ollama",
-                other
-            );
-        }
+                s
+            )
+        })?,
         None => {
             if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                (
-                    "anthropic",
-                    "claude-sonnet-4-6",
-                    "https://api.anthropic.com",
-                    "ANTHROPIC_API_KEY",
-                )
+                LLMProvider::Anthropic
             } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                (
-                    "openai",
-                    "gpt-4o-mini",
-                    "https://api.openai.com",
-                    "OPENAI_API_KEY",
-                )
+                LLMProvider::OpenAI
             } else if std::env::var("OLLAMA_API_KEY").is_ok() {
-                (
-                    "ollama",
-                    "llama3.2",
-                    "https://api.ollama.ai",
-                    "OLLAMA_API_KEY",
-                )
+                LLMProvider::Ollama
             } else {
                 anyhow::bail!(
                     "disclude --llm requires an API key in the environment.\n\
@@ -133,19 +126,14 @@ pub fn detect_provider(
         }
     };
 
+    let (default_model, default_url, key_env) = provider.defaults();
     let api_key = std::env::var(key_env).map_err(|_| {
         anyhow::anyhow!(
             "disclude --llm: provider '{}' selected but {} is not set",
-            pname,
+            provider.name(),
             key_env
         )
     })?;
-
-    let provider = match pname {
-        "anthropic" => LLMProvider::Anthropic,
-        "openai" => LLMProvider::OpenAI,
-        _ => LLMProvider::Ollama,
-    };
 
     Ok(LLMConfig {
         provider,
@@ -161,9 +149,16 @@ pub fn review_scan(result: &ScanResult, config: &LLMConfig) -> anyhow::Result<LL
         return Ok(HashMap::new());
     }
 
-    let system = "You are a security expert reviewing static analysis findings for supply-chain \
-                  attacks. Determine whether each finding is a genuine security concern or a \
-                  false positive. Be precise and consider context.";
+    let system = "You are a security expert reviewing findings from disclude, a supply-chain \
+                  attack scanner. disclude runs three analysis passes: (1) raw: byte-level \
+                  patterns such as unicode anomalies, encoded blobs, and high-entropy strings; \
+                  (2) token: identifier and string-construction patterns such as concatenated \
+                  sensitive names or macro redefinitions; (3) ast: semantic patterns such as \
+                  dynamic execution, shell calls, and encoded dropper pipelines. Raw findings \
+                  have a higher false-positive rate than AST findings. For each finding you \
+                  receive, determine whether it represents genuine obfuscation or malicious \
+                  intent versus a legitimate coding pattern. Consider the pass type, signal, \
+                  snippet, and file context.";
 
     let mut review: LLMReview = HashMap::new();
     for batch in &batches {
@@ -226,11 +221,17 @@ pub fn build_prompt(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> S
     for (_key, f, lang) in batch {
         let id = finding_id(root, f);
         let rel = f.path.strip_prefix(root).unwrap_or(&f.path);
+        let pass = match f.pass {
+            crate::finding::PassKind::Raw => "raw",
+            crate::finding::PassKind::Token => "token",
+            crate::finding::PassKind::Ast => "ast",
+        };
         out.push_str(&format!(
-            "Finding {id}\n  File: {} ({}), severity: {}\n  Signal: {}\n  Message: {}\n  Snippet:\n    {}\n\n",
+            "Finding {id}\n  File: {} ({}), severity: {}, pass: {}\n  Signal: {}\n  Message: {}\n  Snippet:\n    {}\n\n",
             rel.display(),
             lang.as_str(),
             f.severity.as_str(),
+            pass,
             f.kind.as_str(),
             f.message,
             f.snippet
@@ -259,7 +260,7 @@ pub fn call_anthropic(
     let url = format!("{}/v1/messages", config.base_url);
     let body = json!({
         "model": config.model,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "system": system,
         "messages": [{"role": "user", "content": user}]
     });
@@ -324,12 +325,18 @@ pub fn parse_response(
     let json_str = extract_json(raw);
     let parsed: Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            eprintln!("disclude: llm response parse error: {e}");
+            return Vec::new();
+        }
     };
 
     let arr = match parsed["verdicts"].as_array() {
         Some(a) => a,
-        None => return Vec::new(),
+        None => {
+            eprintln!("disclude: llm response missing 'verdicts' array");
+            return Vec::new();
+        }
     };
 
     let mut out = Vec::new();

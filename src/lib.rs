@@ -153,8 +153,9 @@ fn run_scan_cli(args: ScanArgs) -> anyhow::Result<u8> {
             args.llm_base_url.as_deref(),
         )?;
         eprintln!(
-            "disclude: sending findings to {} for review…",
-            config.provider_name()
+            "disclude: sending findings to {} ({}) for review…",
+            config.provider_name(),
+            config.model
         );
         Some(llm::review_scan(&result, &config)?)
     } else {
