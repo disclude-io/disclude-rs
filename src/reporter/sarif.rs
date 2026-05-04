@@ -11,6 +11,7 @@ use std::io::{self, Write};
 use serde_json::{json, Map, Value};
 
 use crate::finding::{Finding, ScanResult, Severity, SignalKind};
+use crate::llm::{LLMReview, finding_key};
 
 const SARIF_VERSION: &str = "2.1.0";
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
@@ -18,9 +19,14 @@ const TOOL_NAME: &str = "disclude";
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TOOL_URI: &str = "https://github.com/disclude-io/disclude-rs";
 
-pub fn render(result: &ScanResult, threshold: Severity, writer: &mut dyn Write) -> io::Result<()> {
+pub fn render(
+    result: &ScanResult,
+    threshold: Severity,
+    llm_review: Option<&LLMReview>,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
     let rules = build_rules();
-    let results = build_results(result, threshold);
+    let results = build_results(result, threshold, llm_review);
 
     let doc = json!({
         "version": SARIF_VERSION,
@@ -64,7 +70,11 @@ fn build_rules() -> Vec<Value> {
         .collect()
 }
 
-fn build_results(result: &ScanResult, threshold: Severity) -> Vec<Value> {
+fn build_results(
+    result: &ScanResult,
+    threshold: Severity,
+    llm_review: Option<&LLMReview>,
+) -> Vec<Value> {
     let mut out = Vec::new();
     for fa in &result.files {
         let uri = relative_uri(&result.root, &fa.path);
@@ -72,19 +82,32 @@ fn build_results(result: &ScanResult, threshold: Severity) -> Vec<Value> {
             if f.severity < threshold {
                 continue;
             }
-            out.push(finding_to_result(f, &uri));
+            let verdict = llm_review.and_then(|r| r.get(&finding_key(f)));
+            out.push(finding_to_result(f, &uri, verdict));
         }
     }
     out
 }
 
-fn finding_to_result(f: &Finding, uri: &str) -> Value {
+fn finding_to_result(
+    f: &Finding,
+    uri: &str,
+    llm_verdict: Option<&crate::llm::LLMVerdict>,
+) -> Value {
     let mut properties = Map::new();
     properties.insert("confidence".into(), Value::from(f64::from(f.confidence)));
     properties.insert("pass".into(), Value::from(pass_str(f.pass)));
     properties.insert("diffIntroduced".into(), Value::from(f.diff_introduced));
     if !f.snippet.is_empty() {
         properties.insert("snippet".into(), Value::from(f.snippet.clone()));
+    }
+    if let Some(v) = llm_verdict {
+        properties.insert("llm_score".into(), Value::from(v.score));
+        properties.insert(
+            "llm_verdict".into(),
+            Value::from(format!("{:?}", v.verdict).to_lowercase()),
+        );
+        properties.insert("llm_summary".into(), Value::from(v.summary.clone()));
     }
 
     json!({
@@ -437,7 +460,7 @@ mod tests {
 
     fn render_to_value(result: &ScanResult, threshold: Severity) -> Value {
         let mut buf = Vec::new();
-        render(result, threshold, &mut buf).expect("render ok");
+        render(result, threshold, None, &mut buf).expect("render ok");
         serde_json::from_slice(&buf).expect("valid json")
     }
 

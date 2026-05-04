@@ -9,6 +9,7 @@ pub mod diff;
 pub mod finding;
 pub mod ignore;
 pub mod language;
+pub mod llm;
 pub mod package_json;
 pub mod raw;
 pub mod reporter;
@@ -85,6 +86,22 @@ struct ScanArgs {
     /// Skip AST analysis (faster, less accurate).
     #[arg(long)]
     no_ast: bool,
+
+    /// Send findings to an LLM for validation (requires an API key in env).
+    #[arg(long)]
+    llm: bool,
+
+    /// LLM provider: anthropic|openai|ollama (auto-detected from env if omitted).
+    #[arg(long)]
+    llm_provider: Option<String>,
+
+    /// Override the default model for the selected provider.
+    #[arg(long)]
+    llm_model: Option<String>,
+
+    /// Override the API base URL (e.g. a custom Ollama endpoint).
+    #[arg(long)]
+    llm_base_url: Option<String>,
 }
 
 /// Run the disclude CLI. `args[0]` should be the binary name (passed to clap as the program name).
@@ -129,8 +146,23 @@ fn run_scan_cli(args: ScanArgs) -> anyhow::Result<u8> {
 
     let result = scan::scan(&args.path, &opts)?;
 
+    let llm_review: Option<llm::LLMReview> = if args.llm {
+        let config = llm::detect_provider(
+            args.llm_provider.as_deref(),
+            args.llm_model.as_deref(),
+            args.llm_base_url.as_deref(),
+        )?;
+        eprintln!(
+            "disclude: sending findings to {} for review…",
+            config.provider_name()
+        );
+        Some(llm::review_scan(&result, &config)?)
+    } else {
+        None
+    };
+
     let mut stdout = std::io::stdout().lock();
-    reporter::report(&result, threshold, format, &mut stdout)?;
+    reporter::report(&result, threshold, format, llm_review.as_ref(), &mut stdout)?;
 
     if args.exit_code {
         let hit = result
