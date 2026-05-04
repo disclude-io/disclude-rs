@@ -202,7 +202,8 @@ fn reclassify(bytes: &[u8], findings: Vec<Finding>, tokens: &[Token]) -> Vec<Fin
                     if matches!(
                         ctx,
                         Some(TokenKind::Comment) | Some(TokenKind::StringLiteral)
-                    ) {
+                    ) && f.severity != Severity::Critical
+                    {
                         f.severity = Severity::Info;
                         f.confidence = (f.confidence * 0.6).max(0.20);
                         f.message = format!("{} (in string/comment)", f.message);

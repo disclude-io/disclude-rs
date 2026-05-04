@@ -4,14 +4,20 @@ Note:
 
 
 ## Unicode character smuggling
-
 https://aws.amazon.com/blogs/security/defending-llm-applications-against-unicode-character-smuggling/
 
-
-
-On Glassworm:
+## On Glassworm:
 https://www.scientificamerican.com/article/glassworm-malware-hides-in-invisible-open-source-code/
 
 
-Trojan Source: Invisible Vulnerabilties
+## Trojan Source: Invisible Vulnerabilties
 https://www.usenix.org/system/files/sec23fall-prepub-151-boucher.pdf
+
+
+
+# Related Projects
+
+https://github.com/lirantal/anti-trojan-source
+https://github.com/junbjnnn/glassworm-poc
+
+

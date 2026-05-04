@@ -4,6 +4,7 @@
 //! original file, never char offsets. The file is decoded once; byte offsets
 //! come straight from `char_indices`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::finding::{redact_snippet, Finding, PassKind, Severity, SignalKind};
@@ -110,18 +111,32 @@ fn scan_bidi_and_zero_width(
 }
 
 // ---------------------------------------------------------------------------
-// Unicode Tags block scan (U+E0001, U+E0020–U+E007F)
+// Invisible Unicode character scan
 // ---------------------------------------------------------------------------
 //
-// The Tags block contains invisible "tag" variants of ASCII printable chars.
-// They have no legitimate use in source code; their only known use is
-// obfuscation — e.g. IOCCC 2024 "salmon" embeds them in macro names and
-// inline code to change program behaviour invisibly.
+// Three related families of invisible characters are used for payload smuggling
+// in source code:
+//
+//   * Tags block (U+E0001, U+E0020–U+E007F) — invisible tag variants of ASCII.
+//     Used in IOCCC 2024 "salmon" and similar obfuscations.
+//
+//   * Variation Selectors (U+FE00–U+FE0F) — 16 selectors for glyph variants.
+//     No visual rendering in source; exploited by glassworm-style attacks to
+//     encode nibbles 0–15.
+//
+//   * Variation Selectors Supplement (U+E0100–U+E01EF) — 240 selectors.
+//     Each encodes one byte (value = cp − 0xE0100 + 16) in the glassworm
+//     technique, making an entirely invisible payload inside a string literal.
 
 fn is_tag_char(c: char) -> bool {
     let cp = c as u32;
-    // U+E0001 LANGUAGE TAG; U+E0020–U+E007F tag variants of ASCII 0x20–0x7F.
-    cp == 0xE0001 || matches!(cp, 0xE0020..=0xE007F)
+    // Tags block
+    cp == 0xE0001
+        || matches!(cp, 0xE0020..=0xE007F)
+        // Variation Selectors (FE00-FE0F): no legitimate use in source code
+        || matches!(cp, 0xFE00..=0xFE0F)
+        // Variation Selectors Supplement (E0100-E01EF): glassworm payload carriers
+        || matches!(cp, 0xE0100..=0xE01EF)
 }
 
 fn tag_char_name(c: char) -> String {
@@ -133,28 +148,105 @@ fn tag_char_name(c: char) -> String {
             let ascii = (cp - 0xE0000) as u8 as char;
             format!("U+{:05X} TAG {:?}", cp, ascii)
         }
+        0xFE00..=0xFE0F => {
+            format!("U+{:04X} VARIATION SELECTOR-{} (invisible payload carrier)", cp, cp - 0xFE00 + 1)
+        }
+        0xE0100..=0xE01EF => {
+            format!("U+{:05X} VARIATION SELECTOR SUPPLEMENT (invisible payload carrier, encodes byte 0x{:02X})", cp, cp - 0xE0100 + 16)
+        }
         _ => format!("U+{:05X} invisible tag character", cp),
     }
 }
 
+/// Attempt to decode a sequence of invisible tag/VS codepoints back to bytes.
+///
+/// * Tags block (E0020-E007F): byte = cp - 0xE0000
+/// * Variation Selectors (FE00-FE0F): byte = cp - 0xFE00 (nibbles 0-15)
+/// * Variation Selectors Supplement (E0100-E01EF): byte = cp - 0xE0100 + 16
+///
+/// Returns the decoded UTF-8 string if all codepoints are decodable and the
+/// result is valid UTF-8; otherwise returns None.
+fn try_decode_invisible_payload(chars: &[char]) -> Option<String> {
+    let mut bytes = Vec::with_capacity(chars.len());
+    for &c in chars {
+        let cp = c as u32;
+        if matches!(cp, 0xFE00..=0xFE0F) {
+            bytes.push((cp - 0xFE00) as u8);
+        } else if matches!(cp, 0xE0100..=0xE01EF) {
+            bytes.push((cp - 0xE0100 + 16) as u8);
+        } else if matches!(cp, 0xE0020..=0xE007F) {
+            bytes.push((cp - 0xE0000) as u8);
+        } else {
+            return None;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// When ≥ this many invisible tag characters appear on the same source line,
+/// aggregate them into a single CRITICAL finding instead of per-char warnings.
+const INVISIBLE_CLUSTER_THRESHOLD: usize = 4;
+
 fn scan_tag_chars(path: &Path, bytes: &[u8], text: &str, index: &LineIndex) -> Vec<Finding> {
-    let mut findings = Vec::new();
+    // Group (offset, col, char) tuples by line.
+    let mut by_line: HashMap<usize, Vec<(usize, usize, char)>> = HashMap::new();
     for (offset, c) in text.char_indices() {
         if is_tag_char(c) {
             let (line, col) = index.locate(offset);
+            by_line.entry(line).or_default().push((offset, col, c));
+        }
+    }
+
+    let mut lines: Vec<usize> = by_line.keys().copied().collect();
+    lines.sort_unstable();
+
+    let mut findings = Vec::new();
+    for line in lines {
+        let chars = &by_line[&line];
+        if chars.len() >= INVISIBLE_CLUSTER_THRESHOLD {
+            // Aggregate into one CRITICAL finding, decoding the payload if possible.
+            let (first_offset, first_col, _) = chars[0];
+            let raw_chars: Vec<char> = chars.iter().map(|(_, _, c)| *c).collect();
+            let message = match try_decode_invisible_payload(&raw_chars) {
+                Some(decoded) => format!(
+                    "{} invisible characters encode hidden payload: {:?}",
+                    chars.len(),
+                    decoded
+                ),
+                None => format!(
+                    "{} invisible tag characters on this line (possible encoded payload)",
+                    chars.len()
+                ),
+            };
             findings.push(Finding {
                 path: path.to_path_buf(),
-                byte_offset: offset,
+                byte_offset: first_offset,
                 line,
-                col,
+                col: first_col,
                 pass: PassKind::Raw,
                 kind: SignalKind::UnicodeInvisible,
-                severity: Severity::Warn,
-                confidence: 0.90,
-                message: format!("{} in source", tag_char_name(c)),
-                snippet: redact_snippet(&snippet_around(bytes, offset, 80)),
+                severity: Severity::Critical,
+                confidence: 0.99,
+                message,
+                snippet: redact_snippet(&snippet_around(bytes, first_offset, 80)),
                 diff_introduced: false,
             });
+        } else {
+            for (offset, col, c) in chars {
+                findings.push(Finding {
+                    path: path.to_path_buf(),
+                    byte_offset: *offset,
+                    line,
+                    col: *col,
+                    pass: PassKind::Raw,
+                    kind: SignalKind::UnicodeInvisible,
+                    severity: Severity::Warn,
+                    confidence: 0.90,
+                    message: format!("{} in source", tag_char_name(*c)),
+                    snippet: redact_snippet(&snippet_around(bytes, *offset, 80)),
+                    diff_introduced: false,
+                });
+            }
         }
     }
     findings

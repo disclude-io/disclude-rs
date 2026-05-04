@@ -1680,3 +1680,51 @@ fn bash_obfuscate_fixture_emits_single_critical_eval() {
         file.findings
     );
 }
+
+#[test]
+fn js_glassworm_fixture_emits_invisible_and_dynamic_execution() {
+    // glassworm-style attack: a JS template literal contains 38 invisible
+    // Variation Selector Supplement codepoints (U+E0100-E01EF) that encode a
+    // hidden payload; at runtime `new Function(...)` executes it.
+    // We expect UnicodeInvisible findings for each encoded byte plus a
+    // CRITICAL DynamicExecution for the `new Function(...)` call.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/hidden_payload.js")
+        })
+        .expect("typescript/hidden_payload.js fixture was scanned");
+
+    // The 38 VSS codepoints should be collapsed into one CRITICAL aggregate
+    // finding whose message includes the decoded payload string.
+    let aggregate = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::UnicodeInvisible
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL UnicodeInvisible aggregate for glassworm VSS payload");
+    assert!(
+        aggregate.message.contains("38"),
+        "expected aggregate message to report 38 chars, got: {}",
+        aggregate.message
+    );
+    assert!(
+        aggregate.message.contains("console.log"),
+        "expected decoded payload in aggregate message, got: {}",
+        aggregate.message
+    );
+
+    file.findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution for new Function(...) in hidden_payload.js");
+}
