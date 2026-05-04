@@ -80,9 +80,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
             "pipeline" => check_pipeline(node, bytes, path, index, findings),
             "function_definition" => check_function_shadow(node, bytes, path, index, findings),
             "variable_assignment" => check_ifs_manipulation(node, bytes, path, index, findings),
-            "string" | "raw_string" => {
-                check_destructive_string(node, bytes, path, index, findings)
-            }
+            "string" | "raw_string" => check_destructive_string(node, bytes, path, index, findings),
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {

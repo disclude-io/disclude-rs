@@ -1480,7 +1480,10 @@ fn bash_env_var_fixture_emits_destructive_payload_and_eval() {
         .find(|f| f.kind == SignalKind::DestructiveCommandPayload)
         .expect("expected DestructiveCommandPayload on bash/env_var.sh");
     assert_eq!(payload.severity, disclude::finding::Severity::Critical);
-    assert_eq!(payload.line, 2, "finding should anchor on the string literal");
+    assert_eq!(
+        payload.line, 2,
+        "finding should anchor on the string literal"
+    );
 
     let dynx = file
         .findings
