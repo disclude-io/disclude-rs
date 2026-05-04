@@ -1,8 +1,9 @@
 # disclude
 
-Scan a (C, Rust, Python, TypeScript, Bash/Shell) source tree for signs that code is hiding its intent, including Unicode attacks, encoded payloads, dynamic execution patterns, and build-time escape hatches. This is not a general purpose vulnerability scanner. This is a tool to surface the techniques used to make malicious code look benign on review.
+Scan source code for signs of hidden intent and obfuscation, including Unicode attacks, encoded payloads, dynamic execution patterns, and supply-chain escape hatches. This is not a general purpose vulnerability scanner: `disclude` is a static analysis tool specialized in finding hidden malicious code in C, Rust, Python, TypeScript, and Bash.
 
-The static analyzer is implemented in fast, multi-threaded Rust, and employs three views of the code: as raw strings, as custom tokens, and as a full abstract syntax tree. Useful for humans, and useful for AI agents: find areas for examination faster (and cheaper) than full code scans.
+The static analyzer is implemented in fast, multi-threaded Rust, and employs three views of the code: as raw strings, as custom tokens, and as a full abstract syntax tree. An optional fourth pass sends findings to an LLM (Anthropic, OpenAI, or Ollama) to eliminate false-positives and provide confidence scores. Combining robust static analysis with targeted LLM review provides speed, cost efficiency, and excellent detection quality.
+
 
 ## Install
 
@@ -17,6 +18,18 @@ To instsall the CLI via Rust `cargo`:
 ```
 cargo install disclude
 ```
+
+
+## Output formats
+
+**`human`**: coloured terminal output grouped by file.
+
+**`json`**: newline-delimited JSON, one object per file. Suitable for further processing.
+
+**`sarif`**: [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), compatible with GitHub Code Scanning, VS Code SARIF viewer, and most CI platforms. Every signal kind appears in the rules catalog even if no findings were produced.
+
+
+
 
 ## Usage
 
@@ -41,6 +54,7 @@ disclude scan <path> [options]
 | `--llm-base-url` | per-provider | Override the API base URL |
 
 
+
 ### Examples
 
 ```sh
@@ -63,9 +77,10 @@ disclude scan ./my-package --llm
 disclude scan ./my-package --llm --llm-provider anthropic --llm-model claude-opus-4-7
 ```
 
+
 ## LLM review
 
-The optional `--llm` flag adds a fourth analysis step after the three static passes. WARN and CRITICAL findings are batched (up to ~6 KB of context per request) and sent to an LLM, which returns a verdict for each finding.
+The optional `--llm` flag adds a fourth analysis step after the three static passes. WARN and CRITICAL findings are batched (up to ~6 KB of context per request) and sent to an LLM, which enriches findings with verdict and confidence for each finding.
 
 ### Provider setup
 
@@ -91,7 +106,7 @@ Each finding receives a verdict on a 0–4 axis:
 | 3 | `suspicious` | Concerning pattern, likely intentional |
 | 4 | `confirmed` | Strong evidence of malicious intent |
 
-### Output
+### LLM-Augmented Output
 
 **`human`**: a `llm [score/verdict  confidence%] summary` line is printed after each finding.
 
@@ -99,13 +114,6 @@ Each finding receives a verdict on a 0–4 axis:
 
 **`sarif`**: `llm_score`, `llm_verdict`, and `llm_summary` are added to each result's `properties`.
 
-## Output formats
-
-**`human`**: coloured terminal output grouped by file.
-
-**`json`**: newline-delimited JSON, one object per file. Suitable for further processing.
-
-**`sarif`**: [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), compatible with GitHub Code Scanning, VS Code SARIF viewer, and most CI platforms. Every signal kind appears in the rules catalog even if no findings were produced.
 
 
 ## Languages
@@ -125,14 +133,10 @@ Language is detected from file extension or shebang line.
 
 Each file passes through up to three static analysis layers. Later layers refine earlier ones. For example, a base64 blob found in a comment is demoted to `info` by the token pass because encoded text in comments is common and low-risk.
 
-```
-Raw pass   → byte-level: Unicode codepoints, encoded strings, entropy, line length
-Token pass → language-aware: reclassify raw findings by context (identifier / string / comment),
-             emit identifier anomalies and string-concat patterns
-AST pass   → tree-sitter: function call patterns, build scripts, install hooks
-LLM pass   → optional: send WARN/CRITICAL findings to an LLM for false-positive validation
-             (requires --llm and an API key; see LLM review above)
-```
+- **Raw pass** — byte-level: Unicode codepoints, encoded strings, entropy, line length
+- **Token pass** — language-aware: reclassify raw findings by context (identifier / string / comment), emit identifier anomalies and string-concat patterns
+- **AST pass** — tree-sitter: function call patterns, build scripts, install hooks
+- **LLM pass** — optional: send WARN/CRITICAL findings to an LLM for false-positive validation (requires `--llm` and an API key; see [LLM review](#llm-review))
 
 Severity levels: **critical** (high confidence attack signal), **warn** (suspicious, review recommended), **info** (low confidence or expected in some legitimate code).
 
