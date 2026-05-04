@@ -63,6 +63,7 @@ pub enum SignalKind {
     DataUriImport,
     GeneratorYieldCallable,
     ErrorStackInspection,
+    FunctionShadowing,
 }
 
 impl SignalKind {
@@ -113,6 +114,7 @@ impl SignalKind {
             SignalKind::DataUriImport => "data-uri-import",
             SignalKind::GeneratorYieldCallable => "generator-yield-callable",
             SignalKind::ErrorStackInspection => "error-stack-inspection",
+            SignalKind::FunctionShadowing => "function-shadowing",
         }
     }
 }

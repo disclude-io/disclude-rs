@@ -1462,6 +1462,65 @@ fn bash_wget_exec_fixture_emits_dynamic_exec_critical() {
 }
 
 #[test]
+fn bash_function_shadowing_fixture_emits_critical() {
+    // function_shadowing.sh defines `sudo()` to capture the typed password
+    // before forwarding to the real sudo — a classic credential-theft pattern.
+    // The FunctionShadowing signal must fire CRITICAL and name the shadowed command.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("bash/function_shadowing.sh")
+        })
+        .expect("bash/function_shadowing.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::FunctionShadowing)
+        .expect("expected FunctionShadowing on bash/function_shadowing.sh");
+    assert_eq!(hit.severity, disclude::finding::Severity::Critical);
+    assert!(
+        hit.message.contains("sudo"),
+        "expected message to name the shadowed command, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_b64_source_fixture_emits_base64_and_dynamic_import() {
+    // b64_source.sh stores a base64-encoded payload in a variable, then decodes
+    // and sources it via `source <(echo $PAYLOAD | base64 -d)`.  Two signals
+    // must fire: the raw-pass base64 blob and the AST-pass dynamic import from
+    // the process substitution passed to `source`.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/b64_source.sh"))
+        .expect("bash/b64_source.sh fixture was scanned");
+
+    file.findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncodingBase64)
+        .expect("expected EncodingBase64 on bash/b64_source.sh");
+
+    let import_hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicImport)
+        .expect("expected DynamicImport from source <(…) on bash/b64_source.sh");
+    assert_eq!(import_hit.severity, disclude::finding::Severity::Warn);
+    assert!(
+        import_hit.message.contains("source"),
+        "expected message to cite `source`, got: {}",
+        import_hit.message
+    );
+}
+
+#[test]
 fn bash_variable_expansion_fixture_emits_dynamic_execution_critical() {
     // variable_expansion.sh reconstructs "bash" and "curl" from substrings of
     // a string variable, then passes the assembled command through `eval`.

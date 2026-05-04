@@ -193,6 +193,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::DataUriImport,
     SignalKind::GeneratorYieldCallable,
     SignalKind::ErrorStackInspection,
+    SignalKind::FunctionShadowing,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -242,6 +243,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::DataUriImport => "DataUriImport",
         SignalKind::GeneratorYieldCallable => "GeneratorYieldCallable",
         SignalKind::ErrorStackInspection => "ErrorStackInspection",
+        SignalKind::FunctionShadowing => "FunctionShadowing",
     }
 }
 
@@ -338,6 +340,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::ErrorStackInspection => {
             "`new Error().stack` is read and string-matched — sandbox/analyzer detection"
         }
+        SignalKind::FunctionShadowing => {
+            "Shell function shadows a sensitive command — intercepts calls and may steal credentials"
+        }
     }
 }
 
@@ -352,7 +357,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::BuiltinsWrite
         | SignalKind::ProxyGlobalHijack
         | SignalKind::TagFunctionDeobfuscator
-        | SignalKind::DataUriImport => Severity::Critical,
+        | SignalKind::DataUriImport
+        | SignalKind::FunctionShadowing => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }
