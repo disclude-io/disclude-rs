@@ -197,6 +197,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::ObfuscatedCommandName,
     SignalKind::IfsManipulation,
     SignalKind::DestructiveCommandPayload,
+    SignalKind::BashDevTcpSocket,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -250,6 +251,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::ObfuscatedCommandName => "ObfuscatedCommandName",
         SignalKind::IfsManipulation => "IfsManipulation",
         SignalKind::DestructiveCommandPayload => "DestructiveCommandPayload",
+        SignalKind::BashDevTcpSocket => "BashDevTcpSocket",
     }
 }
 
@@ -358,6 +360,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         SignalKind::DestructiveCommandPayload => {
             "String literal contains a known-destructive shell command (e.g. rm -rf /, dd disk wipe)"
         }
+        SignalKind::BashDevTcpSocket => {
+            "Bash /dev/tcp or /dev/udp pseudo-device used to open a covert network socket without any external binary"
+        }
     }
 }
 
@@ -374,7 +379,8 @@ fn kind_default_severity(k: SignalKind) -> Severity {
         | SignalKind::TagFunctionDeobfuscator
         | SignalKind::DataUriImport
         | SignalKind::FunctionShadowing
-        | SignalKind::DestructiveCommandPayload => Severity::Critical,
+        | SignalKind::DestructiveCommandPayload
+        | SignalKind::BashDevTcpSocket => Severity::Critical,
         SignalKind::LongLine | SignalKind::ProcMacroPresence => Severity::Info,
         _ => Severity::Warn,
     }

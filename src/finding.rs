@@ -67,6 +67,7 @@ pub enum SignalKind {
     ObfuscatedCommandName,
     IfsManipulation,
     DestructiveCommandPayload,
+    BashDevTcpSocket,
 }
 
 impl SignalKind {
@@ -121,6 +122,7 @@ impl SignalKind {
             SignalKind::ObfuscatedCommandName => "obfuscated-command-name",
             SignalKind::IfsManipulation => "ifs-manipulation",
             SignalKind::DestructiveCommandPayload => "destructive-command-payload",
+            SignalKind::BashDevTcpSocket => "bash-dev-tcp-socket",
         }
     }
 }

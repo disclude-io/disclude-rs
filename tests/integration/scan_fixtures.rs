@@ -1728,3 +1728,22 @@ fn js_glassworm_fixture_emits_invisible_and_dynamic_execution() {
         })
         .expect("expected CRITICAL DynamicExecution for new Function(...) in hidden_payload.js");
 }
+
+#[test]
+fn bash_tcp_exfil_fixture_emits_dev_tcp_socket_critical() {
+    // Uses bash's /dev/tcp/ pseudo-device to open a TCP connection and exfiltrate
+    // /etc/passwd without any external binary (nc, curl, etc.).
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/tcp_exfil.sh"))
+        .expect("bash/tcp_exfil.sh fixture was scanned");
+    file.findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::BashDevTcpSocket
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL BashDevTcpSocket on bash/tcp_exfil.sh");
+}

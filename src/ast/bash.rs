@@ -80,7 +80,11 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
             "pipeline" => check_pipeline(node, bytes, path, index, findings),
             "function_definition" => check_function_shadow(node, bytes, path, index, findings),
             "variable_assignment" => check_ifs_manipulation(node, bytes, path, index, findings),
-            "string" | "raw_string" => check_destructive_string(node, bytes, path, index, findings),
+            "string" | "raw_string" => {
+                check_destructive_string(node, bytes, path, index, findings);
+                check_dev_tcp(node, bytes, path, index, findings);
+            }
+            "word" | "concatenation" => check_dev_tcp(node, bytes, path, index, findings),
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
@@ -276,6 +280,45 @@ fn check_destructive_string(
         severity: Severity::Critical,
         confidence: 0.92,
         message: format!("string literal contains {}", label),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+/// Detect bash `/dev/tcp/HOST/PORT` and `/dev/udp/HOST/PORT` pseudo-device
+/// usage — opens a raw TCP/UDP socket without any external binary, commonly
+/// used for reverse shells and covert data exfiltration.
+fn check_dev_tcp(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let text = node_text(node, bytes);
+    let lower = text.to_ascii_lowercase();
+    let proto = if lower.contains("/dev/tcp/") {
+        "tcp"
+    } else if lower.contains("/dev/udp/") {
+        "udp"
+    } else {
+        return;
+    };
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::BashDevTcpSocket,
+        severity: Severity::Critical,
+        confidence: 0.97,
+        message: format!(
+            "/dev/{} socket opened without external binary (covert channel / reverse shell)",
+            proto
+        ),
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
