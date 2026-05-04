@@ -1462,6 +1462,67 @@ fn bash_wget_exec_fixture_emits_dynamic_exec_critical() {
 }
 
 #[test]
+fn bash_variable_expansion_fixture_emits_dynamic_execution_critical() {
+    // variable_expansion.sh reconstructs "bash" and "curl" from substrings of
+    // a string variable, then passes the assembled command through `eval`.
+    // The eval-of-variable path must catch this even though neither "curl" nor
+    // "bash" appears as a literal token in the source.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("bash/variable_expansion.sh")
+        })
+        .expect("bash/variable_expansion.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution on bash/variable_expansion.sh");
+    assert!(
+        hit.message.contains("eval"),
+        "expected message to cite `eval`, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_c_flag_fixture_emits_dynamic_execution_critical() {
+    // bash_c_flag.sh fetches a payload via command substitution and passes it
+    // to `bash -c`, which is semantically equivalent to eval but avoids the
+    // eval keyword.  Detection must fire CRITICAL DynamicExecution.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("bash/bash_c_flag.sh")
+        })
+        .expect("bash/bash_c_flag.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution on bash/bash_c_flag.sh");
+    assert!(
+        hit.message.contains("bash -c"),
+        "expected message to cite `bash -c`, got: {}",
+        hit.message
+    );
+}
+
+#[test]
 fn bash_obfuscate_fixture_emits_single_critical_eval() {
     // Output of the `bash-obfuscate` npm tool: the original script is split
     // into fragments stored in short variables (Az, Bz, …), then reassembled
