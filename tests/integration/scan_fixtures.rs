@@ -1747,3 +1747,28 @@ fn bash_tcp_exfil_fixture_emits_dev_tcp_socket_critical() {
         })
         .expect("expected CRITICAL BashDevTcpSocket on bash/tcp_exfil.sh");
 }
+
+#[test]
+fn bash_arithmetic_char_fixture_emits_dynamic_execution_critical() {
+    // Assembles a command name from ASCII character codes via arithmetic
+    // expansion (`printf "\\$((105))\\$((100))"` → `id`), stores it in
+    // a variable, then executes `$cmd` — using a variable as the command
+    // name, which is equivalent to eval.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("bash/arithmetic_char.sh")
+        })
+        .expect("bash/arithmetic_char.sh fixture was scanned");
+    file.findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution on bash/arithmetic_char.sh");
+}

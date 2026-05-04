@@ -109,6 +109,28 @@ fn check_command(
     let Some(name_node) = node.child_by_field_name("name") else {
         return;
     };
+
+    // When the command name itself is a variable expansion or substitution,
+    // the executed command is determined at runtime — equivalent to eval.
+    if is_dynamic_expression(name_node, bytes) {
+        let off = node.start_byte();
+        let (line, col) = index.locate(off);
+        findings.push(Finding {
+            path: path.to_path_buf(),
+            byte_offset: off,
+            line,
+            col,
+            pass: PassKind::Ast,
+            kind: SignalKind::DynamicExecution,
+            severity: Severity::Critical,
+            confidence: 0.90,
+            message: "command name is a variable or substitution — executed command determined at runtime".to_string(),
+            snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+            diff_introduced: false,
+        });
+        return;
+    }
+
     let name = command_name_text(name_node, bytes);
     check_obfuscated_command_name(node, name_node, bytes, path, index, findings);
 
@@ -773,8 +795,9 @@ fn is_dynamic_expression(node: Node, bytes: &[u8]) -> bool {
         // command and passes its output as a file descriptor.  Used in
         // `source <(decoder | …)` dropper patterns.
         "process_substitution" => true,
-        // A `string` node is dynamic if any of its children are expansions.
-        "string" | "concatenation" => any_dynamic_child(node, bytes),
+        // A `string`, `concatenation`, or `command_name` node is dynamic if
+        // any of its children are expansions.
+        "string" | "concatenation" | "command_name" => any_dynamic_child(node, bytes),
         _ => false,
     }
 }
@@ -801,6 +824,16 @@ mod tests {
 
     fn run(src: &[u8]) -> Vec<Finding> {
         analyze(&PathBuf::from("test.sh"), src).findings
+    }
+
+    #[test]
+    fn variable_as_command_name_is_critical() {
+        let findings = run(b"$cmd\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution)
+            .expect("expected DynamicExecution when command name is a variable");
+        assert_eq!(hit.severity, Severity::Critical);
     }
 
     #[test]
