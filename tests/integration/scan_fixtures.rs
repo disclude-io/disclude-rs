@@ -1418,18 +1418,19 @@ fn bash_b64_dropper_fixture_emits_base64_and_pipe_to_shell() {
         .find(|f| f.kind == SignalKind::EncodingBase64)
         .expect("expected EncodingBase64 finding on bash/b64_dropper.sh");
 
-    // AST pass: the pipeline ending in `bash` should be flagged.
+    // AST pass: the `base64 -d | bash` pipeline is an encoded dropper —
+    // elevated to CRITICAL.
     let pipe_hit = file
         .findings
         .iter()
         .find(|f| {
             f.kind == SignalKind::DynamicExecution
-                && f.severity == disclude::finding::Severity::Warn
+                && f.severity == disclude::finding::Severity::Critical
         })
-        .expect("expected Warn DynamicExecution (pipe-to-shell) on bash/b64_dropper.sh");
+        .expect("expected Critical DynamicExecution (encoded dropper) on bash/b64_dropper.sh");
     assert!(
-        pipe_hit.message.contains("bash"),
-        "expected pipe message to cite `bash`, got: {}",
+        pipe_hit.message.contains("base64"),
+        "expected pipe message to cite `base64`, got: {}",
         pipe_hit.message
     );
 }
@@ -1794,6 +1795,32 @@ fn bash_path_hijack_fixture_emits_path_command_shadow_critical() {
     assert!(
         hit.message.contains("ls"),
         "expected message to identify `ls` as the shadowed command, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn bash_read_sink_fixture_emits_encoded_dropper_critical() {
+    // Loads a base64 payload via `read -r` heredoc, then runs
+    // `echo $payload | base64 -d | bash` — the decoder-in-pipeline
+    // pattern should be elevated to CRITICAL.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/read_sink.sh"))
+        .expect("bash/read_sink.sh fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution
+                && f.severity == disclude::finding::Severity::Critical
+        })
+        .expect("expected CRITICAL DynamicExecution (encoded dropper) on bash/read_sink.sh");
+    assert!(
+        hit.message.contains("base64"),
+        "expected message to name the decoder, got: {}",
         hit.message
     );
 }

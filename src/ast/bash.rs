@@ -615,6 +615,24 @@ const SHADOW_WATCHLIST: &[&str] = &[
     "git",
 ];
 
+/// Returns the decoder command name if `cmd` is a known payload-decoding
+/// invocation (e.g. `base64 -d`, `openssl enc -d`, `xxd -r`).
+fn pipeline_stage_decoder_name(cmd: Node, bytes: &[u8]) -> Option<&'static str> {
+    let name_node = cmd.child_by_field_name("name")?;
+    let name = command_name_text(name_node, bytes)?;
+    let args = command_arguments(cmd);
+    let has_flag = |flags: &[&str]| {
+        args.iter()
+            .any(|a| flags.iter().any(|f| node_text(*a, bytes) == *f))
+    };
+    match name.as_str() {
+        "base64" if has_flag(&["-d", "--decode"]) => Some("base64"),
+        "openssl" if has_flag(&["-d"]) => Some("openssl"),
+        "xxd" if has_flag(&["-r", "--revert"]) => Some("xxd"),
+        _ => None,
+    }
+}
+
 fn check_pipeline(
     node: Node,
     bytes: &[u8],
@@ -651,6 +669,33 @@ fn check_pipeline(
         return;
     }
 
+    // If any intermediate stage is a payload decoder, this is an encoded
+    // dropper — elevate to CRITICAL and name the decoder.
+    let decoder = commands[..commands.len() - 1]
+        .iter()
+        .filter(|c| c.kind() == "command")
+        .find_map(|c| pipeline_stage_decoder_name(*c, bytes));
+
+    let shell_name = name.as_deref().unwrap_or("shell");
+    let (severity, confidence, message) = match decoder {
+        Some(dec) => (
+            Severity::Critical,
+            0.95,
+            format!(
+                "encoded dropper: pipeline decodes via `{}` and executes with `{}`",
+                dec, shell_name
+            ),
+        ),
+        None => (
+            Severity::Warn,
+            0.80,
+            format!(
+                "pipeline feeds into `{}` — piped data is executed as shell code",
+                shell_name
+            ),
+        ),
+    };
+
     let off = node.start_byte();
     let (line, col) = index.locate(off);
     findings.push(Finding {
@@ -660,12 +705,9 @@ fn check_pipeline(
         col,
         pass: PassKind::Ast,
         kind: SignalKind::DynamicExecution,
-        severity: Severity::Warn,
-        confidence: 0.80,
-        message: format!(
-            "pipeline feeds into `{}` — piped data is executed as shell code",
-            name.as_deref().unwrap_or("shell")
-        ),
+        severity,
+        confidence,
+        message,
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
@@ -1006,11 +1048,14 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_into_sh_is_warn() {
+    fn pipeline_with_decoder_into_sh_is_critical() {
         let findings = run(b"echo 'aGVsbG8=' | base64 -d | sh\n");
-        assert!(findings
+        let hit = findings
             .iter()
-            .any(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Warn));
+            .find(|f| f.kind == SignalKind::DynamicExecution)
+            .expect("expected DynamicExecution finding");
+        assert_eq!(hit.severity, Severity::Critical);
+        assert!(hit.message.contains("base64"));
     }
 
     #[test]
