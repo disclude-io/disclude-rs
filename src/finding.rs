@@ -64,6 +64,8 @@ pub enum SignalKind {
     GeneratorYieldCallable,
     ErrorStackInspection,
     FunctionShadowing,
+    ObfuscatedCommandName,
+    IfsManipulation,
 }
 
 impl SignalKind {
@@ -115,6 +117,8 @@ impl SignalKind {
             SignalKind::GeneratorYieldCallable => "generator-yield-callable",
             SignalKind::ErrorStackInspection => "error-stack-inspection",
             SignalKind::FunctionShadowing => "function-shadowing",
+            SignalKind::ObfuscatedCommandName => "obfuscated-command-name",
+            SignalKind::IfsManipulation => "ifs-manipulation",
         }
     }
 }

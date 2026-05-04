@@ -1462,6 +1462,38 @@ fn bash_wget_exec_fixture_emits_dynamic_exec_critical() {
 }
 
 #[test]
+fn bash_ifs_escapes_fixture_emits_obfuscated_command_and_ifs() {
+    // ifs_escapes.sh demonstrates two obfuscation techniques:
+    //   1. `\b\i\n/\n\c -e /\b\i\n/s\h` — every char backslash-quoted to hide /bin/nc
+    //   2. `IFS=,; cmd=/bin/bash,-c,whoami; $cmd` — comma separator splits on expand
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/ifs_escapes.sh"))
+        .expect("bash/ifs_escapes.sh fixture was scanned");
+
+    let obf = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::ObfuscatedCommandName)
+        .expect("expected ObfuscatedCommandName on bash/ifs_escapes.sh");
+    assert_eq!(obf.severity, disclude::finding::Severity::Warn);
+
+    let ifs = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::IfsManipulation)
+        .expect("expected IfsManipulation on bash/ifs_escapes.sh");
+    assert_eq!(ifs.severity, disclude::finding::Severity::Warn);
+    assert!(
+        ifs.message.contains(','),
+        "expected message to cite the comma separator, got: {}",
+        ifs.message
+    );
+}
+
+#[test]
 fn bash_function_shadowing_fixture_emits_critical() {
     // function_shadowing.sh defines `sudo()` to capture the typed password
     // before forwarding to the real sudo — a classic credential-theft pattern.

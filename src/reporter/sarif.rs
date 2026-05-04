@@ -194,6 +194,8 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::GeneratorYieldCallable,
     SignalKind::ErrorStackInspection,
     SignalKind::FunctionShadowing,
+    SignalKind::ObfuscatedCommandName,
+    SignalKind::IfsManipulation,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -244,6 +246,8 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::GeneratorYieldCallable => "GeneratorYieldCallable",
         SignalKind::ErrorStackInspection => "ErrorStackInspection",
         SignalKind::FunctionShadowing => "FunctionShadowing",
+        SignalKind::ObfuscatedCommandName => "ObfuscatedCommandName",
+        SignalKind::IfsManipulation => "IfsManipulation",
     }
 }
 
@@ -342,6 +346,12 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::FunctionShadowing => {
             "Shell function shadows a sensitive command — intercepts calls and may steal credentials"
+        }
+        SignalKind::ObfuscatedCommandName => {
+            "Command name uses many backslash-escape sequences — hides the true command from static analysis"
+        }
+        SignalKind::IfsManipulation => {
+            "`IFS` set to a non-whitespace separator — enables word-splitting of variable expansions into command arguments"
         }
     }
 }

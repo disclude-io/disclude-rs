@@ -21,6 +21,13 @@
 //!   * `name() { … }` where `name` matches a sensitive command (`sudo`, `ssh`,
 //!     `curl`, package managers, …) — function shadows a real command and may
 //!     intercept credentials or redirect network calls → FunctionShadowing CRITICAL.
+//!   * Command name with ≥ 3 backslash-escape sequences (e.g. `\b\i\n/\n\c`)
+//!     — hides the true command from static analysis → ObfuscatedCommandName WARN.
+//!     Note: word-level backslash escapes are also decoded so that obfuscated
+//!     forms of `eval`, `bash`, `source`, etc. still trigger existing checks.
+//!   * `IFS=<non-whitespace>` variable assignment — non-standard separator
+//!     enables word-splitting of a single variable into command + arguments
+//!     → IfsManipulation WARN.
 
 use std::path::Path;
 
@@ -72,6 +79,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
             "command" => check_command(node, bytes, path, index, findings),
             "pipeline" => check_pipeline(node, bytes, path, index, findings),
             "function_definition" => check_function_shadow(node, bytes, path, index, findings),
+            "variable_assignment" => check_ifs_manipulation(node, bytes, path, index, findings),
             _ => {}
         }
         for i in (0..node.child_count() as u32).rev() {
@@ -97,6 +105,7 @@ fn check_command(
         return;
     };
     let name = command_name_text(name_node, bytes);
+    check_obfuscated_command_name(node, name_node, bytes, path, index, findings);
 
     match name.as_deref() {
         Some("eval") => {
@@ -222,6 +231,97 @@ fn emit_dynamic_source(
         confidence: 0.75,
         message: "`source` called with a dynamic path — sourcing a variable script path"
             .to_string(),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+/// Flag command names that use >= 3 backslash-escape sequences to hide their
+/// identity (e.g. `\b\i\n/\n\c` for `/bin/nc`, `\e\v\a\l` for `eval`).
+fn check_obfuscated_command_name(
+    cmd_node: Node,
+    name_node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut cursor = name_node.walk();
+    for child in name_node.children(&mut cursor) {
+        if child.kind() != "word" {
+            continue;
+        }
+        let raw = node_text(child, bytes).as_bytes();
+        let backslash_count = raw.iter().filter(|&&b| b == b'\\').count();
+        if backslash_count >= 3 {
+            let off = cmd_node.start_byte();
+            let (line, col) = index.locate(off);
+            findings.push(Finding {
+                path: path.to_path_buf(),
+                byte_offset: off,
+                line,
+                col,
+                pass: PassKind::Ast,
+                kind: SignalKind::ObfuscatedCommandName,
+                severity: Severity::Warn,
+                confidence: 0.85,
+                message: format!(
+                    "command name contains {} backslash-escape sequences — hiding the true command",
+                    backslash_count
+                ),
+                snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+                diff_introduced: false,
+            });
+            return;
+        }
+    }
+}
+
+/// Flag `IFS=<non-whitespace>` variable assignments.  Setting IFS to a
+/// non-standard separator (e.g. `IFS=,`) lets an attacker encode a command
+/// and its arguments in a single variable and split them apart via `$var`
+/// expansion — a well-known word-splitting obfuscation technique.
+fn check_ifs_manipulation(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    if node_text(name_node, bytes) != "IFS" {
+        return;
+    }
+    let Some(value_node) = node.child_by_field_name("value") else {
+        return; // IFS= (empty reset) is not suspicious
+    };
+    // Restrict to simple unquoted word values (IFS=,  IFS=:  etc.).
+    // Skip ansi_c_string ($'\n') and raw_string (' ') which are used in
+    // legitimate while-read loops and not meaningful obfuscation.
+    if value_node.kind() != "word" {
+        return;
+    }
+    let value = node_text(value_node, bytes);
+    if value.chars().all(|c| c == ' ' || c == '\t' || c == '\n') {
+        return; // whitespace-only value is benign
+    }
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::IfsManipulation,
+        severity: Severity::Warn,
+        confidence: 0.80,
+        message: format!(
+            "`IFS` set to `{}` — non-standard separator enables word-splitting obfuscation",
+            value
+        ),
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
@@ -425,7 +525,26 @@ fn normalize_shell_word(node: Node, bytes: &[u8]) -> String {
         // `ansi_c_string` is `$'...'` with C-style escape sequences.
         // Decode `\xNN` hex escapes to recover the hidden command name.
         "ansi_c_string" => decode_ansi_c_string(node, bytes),
-        // Plain word — use verbatim.
+        // Plain unquoted word — strip `\<char>` escape sequences.  In
+        // bash, `\c` inside an unquoted word is just `c`; the backslash
+        // removes any special meaning.  Decoding here lets the existing
+        // command-name checks catch obfuscated forms like `\e\v\a\l`,
+        // `\b\a\s\h`, or `\s\o\u\r\c\e`.
+        "word" => {
+            let raw = node_text(node, bytes).as_bytes();
+            let mut out = String::new();
+            let mut i = 0;
+            while i < raw.len() {
+                if raw[i] == b'\\' && i + 1 < raw.len() {
+                    out.push(raw[i + 1] as char);
+                    i += 2;
+                } else {
+                    out.push(raw[i] as char);
+                    i += 1;
+                }
+            }
+            out
+        }
         _ => node_text(node, bytes).to_string(),
     }
 }
@@ -648,6 +767,88 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn backslash_obfuscated_command_name_is_warn() {
+        // \b\i\n/\n\c resolves to /bin/nc at runtime
+        let findings = run(b"\\b\\i\\n/\\n\\c -e /bin/sh\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::ObfuscatedCommandName)
+            .expect("expected ObfuscatedCommandName finding");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(
+            hit.message.contains('5') || hit.message.contains('4') || hit.message.contains('3'),
+            "message should cite backslash count, got: {}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn backslash_obfuscated_eval_is_detected_by_both_signals() {
+        // \e\v\a\l decodes to `eval`; both ObfuscatedCommandName and
+        // DynamicExecution (for the variable arg) should fire.
+        let findings = run(b"\\e\\v\\a\\l \"$cmd\"\n");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::ObfuscatedCommandName),
+            "expected ObfuscatedCommandName"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::DynamicExecution
+                    && f.severity == Severity::Critical),
+            "expected CRITICAL DynamicExecution (eval decoded from escape sequences)"
+        );
+    }
+
+    #[test]
+    fn two_backslashes_in_command_name_does_not_fire() {
+        // Only flag when >= 3 escape sequences are present.
+        let findings = run(b"path\\ name\\ here arg\n");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::ObfuscatedCommandName),
+            "two backslashes should not trigger ObfuscatedCommandName"
+        );
+    }
+
+    #[test]
+    fn ifs_comma_assignment_is_warn() {
+        let findings = run(b"IFS=,\ncmd=/bin/bash,-c,whoami\n$cmd\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::IfsManipulation)
+            .expect("expected IfsManipulation finding");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains(','), "message should cite the separator");
+    }
+
+    #[test]
+    fn ifs_newline_ansi_c_does_not_fire() {
+        // IFS=$'\n' is common in while-read loops — must not flag
+        let findings = run(b"IFS=$'\\n'\nwhile read line; do echo \"$line\"; done\n");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::IfsManipulation),
+            "IFS=$'\\n' should not trigger IfsManipulation"
+        );
+    }
+
+    #[test]
+    fn ifs_empty_does_not_fire() {
+        let findings = run(b"IFS=\n");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != SignalKind::IfsManipulation),
+            "IFS= (empty) should not trigger IfsManipulation"
+        );
     }
 
     #[test]
