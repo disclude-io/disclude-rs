@@ -825,7 +825,10 @@ mod tests {
             .find(|f| f.kind == SignalKind::IfsManipulation)
             .expect("expected IfsManipulation finding");
         assert_eq!(hit.severity, Severity::Warn);
-        assert!(hit.message.contains(','), "message should cite the separator");
+        assert!(
+            hit.message.contains(','),
+            "message should cite the separator"
+        );
     }
 
     #[test]
