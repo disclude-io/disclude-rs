@@ -35,6 +35,10 @@ disclude scan <path> [options]
 | `--no-raw` | — | Skip raw byte analysis |
 | `--no-token` | — | Skip token-level analysis |
 | `--no-ast` | — | Skip AST analysis (faster, less precise) |
+| `--llm` | off | Send findings to an LLM for validation (see [LLM review](#llm-review)) |
+| `--llm-provider` | auto | LLM provider: `anthropic`, `openai`, `ollama` |
+| `--llm-model` | per-provider | Override the default model for the selected provider |
+| `--llm-base-url` | per-provider | Override the API base URL |
 
 
 ### Examples
@@ -51,7 +55,49 @@ disclude scan ./my-package --severity critical --exit-code
 
 # Review only what a PR introduced
 disclude scan ./my-package --diff main --exit-code
+
+# LLM-validated scan (auto-detects provider from environment)
+disclude scan ./my-package --llm
+
+# LLM scan with a specific provider and model
+disclude scan ./my-package --llm --llm-provider anthropic --llm-model claude-opus-4-7
 ```
+
+## LLM review
+
+The optional `--llm` flag adds a fourth analysis step after the three static passes. WARN and CRITICAL findings are batched (up to ~6 KB of context per request) and sent to an LLM, which returns a verdict for each finding.
+
+### Provider setup
+
+The provider is auto-detected from environment variables in priority order:
+
+| Provider | Key env var | Default model |
+|---|---|---|
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` |
+| OpenAI | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| Ollama cloud | `OLLAMA_API_KEY` | `llama3.2` |
+
+Pass `--llm-provider` to override auto-detection, `--llm-model` to change the model, and `--llm-base-url` to point at a custom endpoint.
+
+### Verdict scale
+
+Each finding receives a verdict on a 0–4 axis:
+
+| Score | Verdict | Meaning |
+|---|---|---|
+| 0 | `dismissed` | Clearly not a security concern |
+| 1 | `likely_benign` | Common legitimate pattern, probably a false positive |
+| 2 | `inconclusive` | Insufficient context to determine |
+| 3 | `suspicious` | Concerning pattern, likely intentional |
+| 4 | `confirmed` | Strong evidence of malicious intent |
+
+### Output
+
+**`human`**: a `llm [score/verdict  confidence%] summary` line is printed after each finding.
+
+**`json`**: each finding object gains an `llm_verdict` field containing `verdict`, `score`, `confidence`, `summary`, and `reasoning`.
+
+**`sarif`**: `llm_score`, `llm_verdict`, and `llm_summary` are added to each result's `properties`.
 
 ## Output formats
 
@@ -77,13 +123,15 @@ Language is detected from file extension or shebang line.
 
 ## How it works
 
-Each file passes through up to three analysis layers. Later layers refine earlier ones. For example, a base64 blob found in a comment is demoted to `info` by the token pass because encoded text in comments is common and low-risk.
+Each file passes through up to three static analysis layers. Later layers refine earlier ones. For example, a base64 blob found in a comment is demoted to `info` by the token pass because encoded text in comments is common and low-risk.
 
 ```
 Raw pass   → byte-level: Unicode codepoints, encoded strings, entropy, line length
 Token pass → language-aware: reclassify raw findings by context (identifier / string / comment),
              emit identifier anomalies and string-concat patterns
 AST pass   → tree-sitter: function call patterns, build scripts, install hooks
+LLM pass   → optional: send WARN/CRITICAL findings to an LLM for false-positive validation
+             (requires --llm and an API key; see LLM review above)
 ```
 
 Severity levels: **critical** (high confidence attack signal), **warn** (suspicious, review recommended), **info** (low confidence or expected in some legitimate code).
@@ -239,7 +287,9 @@ AST pass; language-specific.
 
 ### 1.2.0
 
-Updates to the public interface.
+- **LLM review pass** (`--llm`): optional fourth analysis step that sends WARN and CRITICAL findings to an LLM (Anthropic, OpenAI, or Ollama cloud) for false-positive validation. Findings are batched by payload size and keyed by `path:line:col` for stable matching. Verdicts (0–4 scale: dismissed → confirmed) are rendered inline in human output and embedded in JSON and SARIF outputs.
+- New Bash/Shell detections: `/dev/tcp` and `/dev/udp` covert socket (`bash-dev-tcp-socket`), variable-as-command-name dynamic execution, PATH hijacking via redirect to a command-named file (`path-command-shadow`), and encoded dropper pipeline elevation (`base64 -d | bash` → critical).
+- Glassworm-style invisible payload detection: ≥4 Unicode variation selector or Tags block characters on one line are aggregated into a single critical finding with the decoded payload string.
 
 
 ### 1.1.0
