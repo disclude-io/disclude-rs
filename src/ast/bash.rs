@@ -551,15 +551,11 @@ const FILE_SHADOW_COMMANDS: &[&str] = &[
     // common system utilities used as PATH hijack decoys
     "ls", "cat", "id", "whoami", "env", "sh", "bash", "dash", "zsh", "which",
     // privilege / authentication
-    "sudo", "su", "doas", "passwd", "login",
-    // remote access / crypto
-    "ssh", "scp", "sftp", "gpg", "gpg2",
-    // network fetchers
-    "curl", "wget", "nc", "netcat",
-    // package managers
-    "pip", "pip3", "pip3.11", "npm", "yarn", "pnpm", "gem", "cargo",
-    "apt", "apt-get", "yum", "dnf", "brew", "pacman", "apk",
-    // language runtimes / version control
+    "sudo", "su", "doas", "passwd", "login", // remote access / crypto
+    "ssh", "scp", "sftp", "gpg", "gpg2", // network fetchers
+    "curl", "wget", "nc", "netcat", // package managers
+    "pip", "pip3", "pip3.11", "npm", "yarn", "pnpm", "gem", "cargo", "apt", "apt-get", "yum",
+    "dnf", "brew", "pacman", "apk", // language runtimes / version control
     "python", "python3", "node", "ruby", "perl", "php", "git",
 ];
 
