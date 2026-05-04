@@ -122,7 +122,7 @@ fn check_command(
                 }
             }
         }
-        Some(n) if SHELL_INTERPRETERS.iter().any(|&s| s == n) => {
+        Some(n) if SHELL_INTERPRETERS.contains(&n) => {
             check_shell_c_flag(node, bytes, path, index, findings, n);
         }
         _ => {}
@@ -238,7 +238,7 @@ fn check_function_shadow(
         return;
     };
     let name = node_text(name_node, bytes);
-    if !SHADOW_WATCHLIST.iter().any(|&s| s == name) {
+    if !SHADOW_WATCHLIST.contains(&name) {
         return;
     }
     let off = node.start_byte();
@@ -311,17 +311,12 @@ const SHELL_INTERPRETERS: &[&str] = &["bash", "sh", "dash", "zsh", "ksh"];
 /// of credential theft or supply-chain tampering.
 const SHADOW_WATCHLIST: &[&str] = &[
     // privilege / authentication
-    "sudo", "su", "doas", "passwd", "login",
-    // remote access / crypto
-    "ssh", "scp", "sftp", "gpg", "gpg2",
-    // network fetchers
-    "curl", "wget", "nc", "netcat",
-    // package managers
-    "pip", "pip3", "pip3.11", "npm", "yarn", "pnpm", "gem", "cargo",
-    "apt", "apt-get", "yum", "dnf", "brew", "pacman", "apk",
-    // language runtimes
-    "python", "python3", "node", "ruby", "perl", "php",
-    // version control
+    "sudo", "su", "doas", "passwd", "login", // remote access / crypto
+    "ssh", "scp", "sftp", "gpg", "gpg2", // network fetchers
+    "curl", "wget", "nc", "netcat", // package managers
+    "pip", "pip3", "pip3.11", "npm", "yarn", "pnpm", "gem", "cargo", "apt", "apt-get", "yum",
+    "dnf", "brew", "pacman", "apk", // language runtimes
+    "python", "python3", "node", "ruby", "perl", "php", // version control
     "git",
 ];
 

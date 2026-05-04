@@ -1560,11 +1560,7 @@ fn bash_c_flag_fixture_emits_dynamic_execution_critical() {
     let file = r
         .files
         .iter()
-        .find(|fa| {
-            fa.path
-                .to_string_lossy()
-                .ends_with("bash/bash_c_flag.sh")
-        })
+        .find(|fa| fa.path.to_string_lossy().ends_with("bash/bash_c_flag.sh"))
         .expect("bash/bash_c_flag.sh fixture was scanned");
     let hit = file
         .findings
