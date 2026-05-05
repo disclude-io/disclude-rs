@@ -144,7 +144,7 @@ fn run_scan_cli(args: ScanArgs) -> anyhow::Result<u8> {
         diff_ref: args.diff,
     };
 
-    let result = scan::scan(&args.path, &opts)?;
+    let mut result = scan::scan(&args.path, &opts)?;
 
     let llm_review: Option<llm::LLMReview> = if args.llm {
         let config = llm::detect_provider(
@@ -157,7 +157,9 @@ fn run_scan_cli(args: ScanArgs) -> anyhow::Result<u8> {
             config.provider_name(),
             config.model
         );
-        Some(llm::review_scan(&result, &config)?)
+        let review = llm::review_scan(&result, &config)?;
+        llm::apply_llm_verdicts(&mut result, &review);
+        Some(review)
     } else {
         None
     };

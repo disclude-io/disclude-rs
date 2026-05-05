@@ -175,6 +175,35 @@ pub fn review_scan(result: &ScanResult, config: &LLMConfig) -> anyhow::Result<LL
     Ok(review)
 }
 
+const DEMOTION_CONFIDENCE: f32 = 0.70;
+
+/// Demote findings the LLM assessed as `dismissed` or `likely_benign` with
+/// sufficient confidence from WARN/CRITICAL down to INFO. Recomputes the
+/// severity counts in `result` so the summary line stays accurate.
+pub fn apply_llm_verdicts(result: &mut ScanResult, review: &LLMReview) {
+    for fa in &mut result.files {
+        for f in &mut fa.findings {
+            if f.severity < Severity::Warn {
+                continue;
+            }
+            if let Some(v) = review.get(&finding_key(f)) {
+                if matches!(v.verdict, Verdict::Dismissed | Verdict::LikelyBenign)
+                    && v.confidence >= DEMOTION_CONFIDENCE
+                {
+                    f.severity = Severity::Info;
+                }
+            }
+        }
+    }
+
+    result.findings_by_severity.clear();
+    for fa in &result.files {
+        for f in &fa.findings {
+            *result.findings_by_severity.entry(f.severity).or_insert(0) += 1;
+        }
+    }
+}
+
 pub fn build_batches(result: &ScanResult) -> Vec<Vec<(FindingKey, Finding, Language)>> {
     let mut batches: Vec<Vec<(FindingKey, Finding, Language)>> = Vec::new();
     let mut current: Vec<(FindingKey, Finding, Language)> = Vec::new();

@@ -289,11 +289,16 @@ AST pass; language-specific.
 
 ## What is New
 
+
+### 1.4.0
+
+LLM review now downgrades WARN and CRITICAL findings if they are determined to be "likely_benign" or "inconclusive" with 70% or more confidence.
+
 ### 1.3.0
 
-- LLM review pass (`--llm`): optional fourth analysis step that sends WARN and CRITICAL findings to an LLM (Anthropic, OpenAI, or Ollama cloud) for false-positive validation. Findings are batched by payload size and keyed by `path:line:col` for stable matching. Verdicts (0–4 scale: dismissed → confirmed) are rendered inline in human output and embedded in JSON and SARIF outputs.
-- New Bash/Shell detections: `/dev/tcp` and `/dev/udp` covert socket (`bash-dev-tcp-socket`), variable-as-command-name dynamic execution, PATH hijacking via redirect to a command-named file (`path-command-shadow`), and encoded dropper pipeline elevation (`base64 -d | bash` → critical).
-- Glassworm-style invisible payload detection: ≥4 Unicode variation selector or Tags block characters on one line are aggregated into a single critical finding with the decoded payload string.
+LLM review pass (`--llm`): optional fourth analysis step that sends WARN and CRITICAL findings to an LLM (Anthropic, OpenAI, or Ollama cloud) for false-positive validation.
+New Bash/Shell detections.
+Glassworm-style invisible payload detection.
 
 ### 1.2.0
 
