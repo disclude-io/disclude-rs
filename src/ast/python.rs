@@ -56,6 +56,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     walk(root, bytes, path, &index, &mut findings);
     check_payload_bytes_literals(root, bytes, path, &index, &mut findings);
     check_decoder_import_with_exec(root, bytes, path, &index, &mut findings);
+    check_decoder_decompress_payload(root, bytes, path, &index, &mut findings);
     check_obfuscated_byte_strings(root, bytes, path, &index, &mut findings);
     check_frame_introspection(root, bytes, path, &index, &mut findings);
     AstOutcome {
@@ -1255,6 +1256,79 @@ fn push_decoder_unique(name: &str, out: &mut Vec<&'static str>) {
             return;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Decoder-import-with-decompress detector
+// ---------------------------------------------------------------------------
+//
+// File imports a decoder/decompressor module AND calls `.decompress()` (or a
+// similar decompression method) anywhere in the file. Unlike the exec variant,
+// the decompressed result doesn't have to be exec'd — writing it to disk or
+// splicing it into a process image (as in kernel-exploit droppers) is equally
+// dangerous.
+
+const DECOMPRESS_METHODS: &[&str] = &["decompress", "decompressobj", "decodestring", "decodebytes"];
+
+fn check_decoder_decompress_payload(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let mut imports: Vec<&'static str> = Vec::new();
+    let mut decompress_call: Option<Node> = None;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "import_statement" | "import_from_statement" => {
+                collect_imported_decoders(node, bytes, &mut imports);
+            }
+            "call" if decompress_call.is_none() => {
+                if let Some(func) = node.child_by_field_name("function") {
+                    if func.kind() == "attribute" {
+                        if let Some(attr) = func.child_by_field_name("attribute") {
+                            let name = &bytes[attr.start_byte()..attr.end_byte()];
+                            if DECOMPRESS_METHODS.iter().any(|m| name == m.as_bytes()) {
+                                decompress_call = Some(node);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+
+    if imports.is_empty() || decompress_call.is_none() {
+        return;
+    }
+    let call = decompress_call.unwrap();
+    let off = call.start_byte();
+    let (line, col) = index.locate(off);
+    let modules: Vec<&str> = imports.iter().take(4).copied().collect();
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::DecoderDecompressPayload,
+        severity: Severity::Warn,
+        confidence: 0.75,
+        message: format!(
+            "file imports decoder module(s) {} and calls `.decompress()` — embedded payload decompressed at runtime",
+            modules.join(", ")
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 120)),
+        diff_introduced: false,
+    });
 }
 
 // ---------------------------------------------------------------------------

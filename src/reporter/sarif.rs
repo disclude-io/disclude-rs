@@ -209,6 +209,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::StringifyDereference,
     SignalKind::PayloadBytesLiteral,
     SignalKind::DecoderImportWithExec,
+    SignalKind::DecoderDecompressPayload,
     SignalKind::BuiltinsWrite,
     SignalKind::FrameIntrospection,
     SignalKind::ProxyGlobalHijack,
@@ -264,6 +265,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::StringifyDereference => "StringifyDereference",
         SignalKind::PayloadBytesLiteral => "PayloadBytesLiteral",
         SignalKind::DecoderImportWithExec => "DecoderImportWithExec",
+        SignalKind::DecoderDecompressPayload => "DecoderDecompressPayload",
         SignalKind::BuiltinsWrite => "BuiltinsWrite",
         SignalKind::FrameIntrospection => "FrameIntrospection",
         SignalKind::ProxyGlobalHijack => "ProxyGlobalHijack",
@@ -351,6 +353,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::DecoderImportWithExec => {
             "Decoder module import co-occurs with exec/eval/compile (multi-stage payload shape)"
+        }
+        SignalKind::DecoderDecompressPayload => {
+            "Decoder module import co-occurs with a .decompress() call — embedded payload decompressed at runtime"
         }
         SignalKind::BuiltinsWrite => {
             "Direct write to the builtins namespace — patches a built-in for every importer"
