@@ -24,6 +24,7 @@ pub use scan::{scan, ScanOptions};
 
 use clap::{Parser, Subcommand};
 use reporter::OutputFormat;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -117,7 +118,23 @@ pub fn run_cli(args: Vec<String>) -> anyhow::Result<u8> {
     };
 
     match cli.command {
-        Command::Scan(args) => run_scan_cli(args),
+        Command::Scan(args) => {
+            let is_sarif = args.format.eq_ignore_ascii_case("sarif");
+            match run_scan_cli(args) {
+                Ok(code) => Ok(code),
+                Err(e) => {
+                    if is_sarif {
+                        // Always emit valid SARIF so CI consumers (e.g. upload-sarif)
+                        // receive well-formed JSON even when the scan itself errors.
+                        let empty = reporter::sarif::empty_document();
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = serde_json::to_writer_pretty(&mut stdout, &empty);
+                        let _ = writeln!(stdout);
+                    }
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
@@ -147,19 +164,33 @@ fn run_scan_cli(args: ScanArgs) -> anyhow::Result<u8> {
     let mut result = scan::scan(&args.path, &opts)?;
 
     let llm_review: Option<llm::LLMReview> = if args.llm {
-        let config = llm::detect_provider(
+        match llm::detect_provider(
             args.llm_provider.as_deref(),
             args.llm_model.as_deref(),
             args.llm_base_url.as_deref(),
-        )?;
-        eprintln!(
-            "disclude: sending findings to {} ({}) for review…",
-            config.provider_name(),
-            config.model
-        );
-        let review = llm::review_scan(&result, &config)?;
-        llm::apply_llm_verdicts(&mut result, &review);
-        Some(review)
+        ) {
+            Err(e) => {
+                eprintln!("disclude: llm skipped — {e}");
+                None
+            }
+            Ok(config) => {
+                eprintln!(
+                    "disclude: sending findings to {} ({}) for review…",
+                    config.provider_name(),
+                    config.model
+                );
+                match llm::review_scan(&result, &config) {
+                    Ok(review) => {
+                        llm::apply_llm_verdicts(&mut result, &review);
+                        Some(review)
+                    }
+                    Err(e) => {
+                        eprintln!("disclude: llm review failed, reporting without verdicts — {e}");
+                        None
+                    }
+                }
+            }
+        }
     } else {
         None
     };

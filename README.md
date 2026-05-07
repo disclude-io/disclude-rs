@@ -290,6 +290,13 @@ AST pass; language-specific.
 ## What is New
 
 
+### 1.5.0
+
+Refined Python detections with `copy_fail.py` fixture.
+
+When using `--format sarif` and no detections are found, a valid SARIF JSON is still emitted.
+
+
 ### 1.4.0
 
 LLM review now downgrades WARN and CRITICAL findings if they are determined to be "likely_benign" or "inconclusive" with 70% or more confidence.

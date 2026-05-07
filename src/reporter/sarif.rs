@@ -19,6 +19,17 @@ const TOOL_NAME: &str = "disclude";
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TOOL_URI: &str = "https://github.com/disclude-io/disclude-rs";
 
+pub fn empty_document() -> serde_json::Value {
+    serde_json::json!({
+        "version": SARIF_VERSION,
+        "$schema": SARIF_SCHEMA,
+        "runs": [{
+            "tool": { "driver": { "name": TOOL_NAME, "version": TOOL_VERSION, "informationUri": TOOL_URI, "rules": build_rules() } },
+            "results": []
+        }]
+    })
+}
+
 pub fn render(
     result: &ScanResult,
     threshold: Severity,
