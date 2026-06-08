@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use crate::ast;
 use crate::ast::FileFlags;
 use crate::diff;
+use crate::embedded;
 use crate::finding::{FileAnalysis, ScanResult, Severity};
 use crate::ignore::walk;
 use crate::language::Language;
@@ -163,18 +164,26 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
         complexity_max = max;
     }
 
-    if opts.run_token {
-        findings = token::analyze(path, &bytes, language, &index, findings);
-    }
+    if language.is_markup() {
+        // Markup files have no token/AST pass of their own. Extract embedded
+        // code blocks and run the per-language passes over each slice, mapping
+        // findings back to file coordinates. Raw-pass findings outside any
+        // block are kept as-is — the global payload scan.
+        findings = analyze_markup_blocks(path, &bytes, language, &index, findings, opts);
+    } else {
+        if opts.run_token {
+            findings = token::analyze(path, &bytes, language, &index, findings);
+        }
 
-    if opts.run_ast {
-        let outcome = ast::analyze(path, &bytes, language);
-        findings.extend(outcome.findings);
-        parse_error = outcome.parse_error;
-        file_flags = outcome.file_flags;
-    }
+        if opts.run_ast {
+            let outcome = ast::analyze(path, &bytes, language);
+            findings.extend(outcome.findings);
+            parse_error = outcome.parse_error;
+            file_flags = outcome.file_flags;
+        }
 
-    scorer::elevate(&mut findings, language, file_flags);
+        scorer::elevate(&mut findings, language, file_flags);
+    }
 
     findings.sort_by_key(|f| (f.byte_offset, f.kind.as_str()));
 
@@ -186,4 +195,79 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
         file_complexity_max: complexity_max,
         parse_error,
     }))
+}
+
+/// Token/AST analysis for markup files: extract embedded code blocks, scan each
+/// under its own language, and merge results back into file coordinates.
+///
+/// `raw_findings` are the whole-file raw-pass findings. Those falling inside a
+/// block are handed to that block's token pass (so they get real code-context
+/// reclassification); those outside every block are kept verbatim as the file's
+/// payload-scan findings. Findings emitted from a block are shifted from
+/// block-local offsets back to file offsets and re-located via `file_index`.
+fn analyze_markup_blocks(
+    path: &Path,
+    bytes: &[u8],
+    language: Language,
+    file_index: &LineIndex,
+    raw_findings: Vec<crate::finding::Finding>,
+    opts: &ScanOptions,
+) -> Vec<crate::finding::Finding> {
+    let blocks = embedded::extract(path, bytes, language);
+    if blocks.is_empty() {
+        return raw_findings;
+    }
+
+    // Partition raw findings: inside a block (by byte offset) vs. file-level.
+    let mut per_block: Vec<Vec<crate::finding::Finding>> = vec![Vec::new(); blocks.len()];
+    let mut findings: Vec<crate::finding::Finding> = Vec::new();
+    for f in raw_findings {
+        match blocks
+            .iter()
+            .position(|b| f.byte_offset >= b.start && f.byte_offset < b.end)
+        {
+            Some(bi) => per_block[bi].push(f),
+            None => findings.push(f),
+        }
+    }
+
+    for (bi, block) in blocks.iter().enumerate() {
+        let slice = &bytes[block.start..block.end];
+        let local_index = LineIndex::new(slice);
+
+        // Re-anchor the block's raw findings to block-local offsets so the
+        // token pass can reclassify them against the real code structure.
+        let mut block_findings = std::mem::take(&mut per_block[bi]);
+        for f in &mut block_findings {
+            f.byte_offset -= block.start;
+            let (line, col) = local_index.locate(f.byte_offset);
+            f.line = line;
+            f.col = col;
+        }
+
+        if opts.run_token {
+            block_findings = token::analyze(path, slice, block.lang, &local_index, block_findings);
+        }
+
+        let mut file_flags = FileFlags::default();
+        if opts.run_ast {
+            let outcome = ast::analyze(path, slice, block.lang);
+            block_findings.extend(outcome.findings);
+            file_flags = outcome.file_flags;
+        }
+        scorer::elevate(&mut block_findings, block.lang, file_flags);
+
+        // Shift back to file coordinates, re-locate, and tag the origin.
+        let tag = format!("[embedded {}] ", block.lang.as_str());
+        for f in &mut block_findings {
+            f.byte_offset += block.start;
+            let (line, col) = file_index.locate(f.byte_offset);
+            f.line = line;
+            f.col = col;
+            f.message = format!("{}{}", tag, f.message);
+        }
+        findings.extend(block_findings);
+    }
+
+    findings
 }

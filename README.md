@@ -1,6 +1,6 @@
 # disclude
 
-Scan source code for signs of hidden intent and obfuscation, including Unicode attacks, encoded payloads, dynamic execution patterns, and supply-chain escape hatches. This is not a general purpose vulnerability scanner: `disclude` is a static analysis tool specialized in finding hidden malicious code in C, Rust, Python, TypeScript, and Bash.
+Scan source code for signs of hidden intent and obfuscation, including Unicode attacks, encoded payloads, dynamic execution patterns, and supply-chain escape hatches. This is not a general purpose vulnerability scanner: `disclude` is a static analysis tool specialized in finding hidden malicious code in C, Rust, Python, TypeScript, and Bash. It also scans text and structured-markup files (`.txt`, `.md`, `.yaml`, `.rst`) for hidden payloads, and extracts the code embedded in them — shell in CI workflows, code fences in docs — to run the same language-specific checks on it.
 
 The static analyzer is implemented in fast, multi-threaded Rust, and employs three views of the code: as raw strings, as custom tokens, and as a full abstract syntax tree. An optional fourth pass sends findings to an LLM (Anthropic, OpenAI, or Ollama) to eliminate false-positives and provide confidence scores. Combining robust static analysis with targeted LLM review provides speed, cost efficiency, and excellent detection quality.
 
@@ -128,6 +128,20 @@ Language is detected from file extension or shebang line.
 | Rust | `.rs` | — |
 | TypeScript | `.ts`, `.tsx`, `.mts`, `.cts` | — |
 | JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | `node`, `deno`, `bun` |
+| Text | `.txt`, `.text` | — |
+| Markdown | `.md`, `.markdown` | — |
+| YAML | `.yaml`, `.yml` | — |
+| reStructuredText | `.rst` | — |
+
+Text and markup files are always scanned by the raw byte-level pass (Unicode attacks, encoded payloads, entropy). For Markdown, YAML, and reStructuredText, disclude additionally **isolates embedded code and scans it with the matching language's token and AST passes**, reporting findings at their location in the markup file:
+
+| Markup | Embedded code extracted | Scanned as |
+|---|---|---|
+| Markdown | Fenced code blocks (` ```bash `, ` ```python `, …) | the fence's language |
+| YAML | GitHub Actions `run:` (honoring `shell:`), GitLab CI `script:`/`before_script:`/`after_script:`, Ansible `shell`/`command` | shell (or the selected interpreter) |
+| reStructuredText | `.. code-block:: <lang>` / `.. sourcecode:: <lang>` directive bodies | the directive's language |
+
+Code blocks in a language disclude does not scan (e.g. ` ```json `, plain text) are covered by the raw payload pass only.
 
 ## How it works
 
@@ -288,6 +302,11 @@ AST pass; language-specific.
 
 
 ## What is New
+
+
+### 1.6.0
+
+Support for text and structured-markup files: `.txt`, `.md`, `.yaml`, `.rst`. These are scanned for hidden payloads by the raw pass, and embedded code is extracted and run through the language-specific token/AST checks — shell in GitHub Actions / GitLab CI / Ansible YAML, fenced code blocks in Markdown, and `code-block` directives in reStructuredText. Findings are reported at their location in the markup file and tagged with the embedded language.
 
 
 ### 1.5.0

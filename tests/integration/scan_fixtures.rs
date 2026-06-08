@@ -1824,3 +1824,99 @@ fn bash_read_sink_fixture_emits_encoded_dropper_critical() {
         hit.message
     );
 }
+
+// ---------------------------------------------------------------------------
+// Markup / text file types — embedded code extraction + global payload scan.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gha_yaml_run_emits_embedded_bash_finding() {
+    // GitHub Actions `run:` scalars (inline and block) are scanned as Bash:
+    // `curl | bash` (pipe-to-shell) and `eval "$INJECTED"` (dynamic eval).
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "yaml/gha_curl_pipe.yml",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn gitlab_yaml_script_emits_embedded_bash_finding() {
+    // GitLab `script:` sequence items are scanned as Bash; `eval "$CMD"` fires.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "yaml/gitlab_script_eval.yml",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn markdown_python_fence_emits_dynamic_execution() {
+    // A ```python fence containing exec(<non-literal>) is scanned as Python.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "markdown/skill_exec.md",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn markdown_embedded_finding_maps_to_real_line() {
+    // The embedded-block finding must report its location in the *markdown*
+    // file. `exec(data)` sits on line 7 of skill_exec.md.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/skill_exec.md"))
+        .expect("skill_exec.md fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution)
+        .expect("DynamicExecution finding present");
+    assert_eq!(hit.line, 7, "expected exec() on line 7, got {}", hit.line);
+    assert!(
+        hit.message.contains("[embedded python]"),
+        "expected embedded-origin tag, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn markdown_clean_emits_no_findings() {
+    // Prose plus a non-code ```text fence must not produce findings.
+    let r = run();
+    let clean = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/clean.md"))
+        .expect("clean.md fixture was scanned");
+    assert!(
+        clean.findings.is_empty(),
+        "clean markdown produced findings: {:?}",
+        clean.findings
+    );
+}
+
+#[test]
+fn rst_code_block_emits_embedded_bash_finding() {
+    // `.. code-block:: bash` body (after a `:linenos:` option) is scanned as
+    // Bash; `eval "$REMOTE_CMD"` fires.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "rst/code_block.rst",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn text_file_bidi_payload_is_scanned() {
+    // Plain .txt gets the global raw payload pass: a bidi override is flagged.
+    let r = run();
+    assert!(has_kind_in(&r, "text/bidi.txt", SignalKind::UnicodeBidi));
+}

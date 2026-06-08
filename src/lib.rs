@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod diff;
+pub mod embedded;
 pub mod finding;
 pub mod ignore;
 pub mod language;

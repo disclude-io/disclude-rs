@@ -44,5 +44,10 @@ pub fn analyze(path: &Path, bytes: &[u8], lang: Language) -> AstOutcome {
         Language::Python => python::analyze(path, bytes),
         Language::Rust => rust::analyze(path, bytes),
         Language::TypeScript | Language::JavaScript => typescript::analyze(path, bytes, lang),
+        // Markup languages have no AST pass of their own; embedded code blocks
+        // are analyzed under their resolved code language instead.
+        Language::Text | Language::Markdown | Language::Yaml | Language::Rst => {
+            AstOutcome::default()
+        }
     }
 }
