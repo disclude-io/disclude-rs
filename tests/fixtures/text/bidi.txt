@@ -1,0 +1,2 @@
+These release notes contain a hidden right-to-left override ‮ that flips text.
+The rest of the file is ordinary prose.

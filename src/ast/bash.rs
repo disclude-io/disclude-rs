@@ -134,6 +134,7 @@ fn check_command(
 
     let name = command_name_text(name_node, bytes);
     check_obfuscated_command_name(node, name_node, bytes, path, index, findings);
+    check_encrypted_archive(node, bytes, path, index, findings);
 
     match name.as_deref() {
         Some("eval") => {
@@ -543,6 +544,80 @@ fn find_destructive_pattern(text: &str) -> Option<(&'static str, &'static str)> 
     None
 }
 
+/// Detect extraction/decryption of a password-protected archive with the
+/// secret supplied inline. Encrypting a payload and shipping its password
+/// alongside is a common way to smuggle code past static scanners and AV: the
+/// scanner cannot inspect the encrypted blob, yet the inline secret lets it
+/// auto-unpack at runtime. This is squarely "hiding intent," independent of
+/// what the extracted payload then does.
+fn check_encrypted_archive(
+    node: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let Some(name) = command_name_text(name_node, bytes) else {
+        return;
+    };
+    let args: Vec<String> = command_arguments(node)
+        .iter()
+        .map(|a| normalize_shell_word(*a, bytes))
+        .collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    // A short flag with its value attached, e.g. `-Psecret`, `-psecret`.
+    let has_attached = |prefix: &str| {
+        args.iter()
+            .any(|a| a.len() > prefix.len() && a.starts_with(prefix))
+    };
+
+    let label = match name.as_str() {
+        // `unzip -P <password>` (value may be attached or the next argument).
+        "unzip" if has("-P") || has_attached("-P") => {
+            "a password-protected zip archive (`unzip -P`)"
+        }
+        // `7z x -p<password>` — the 7-Zip password flag attaches its value.
+        "7z" | "7za" | "7zr" if has("-p") || has_attached("-p") => {
+            "a password-protected 7-Zip archive (`7z -p`)"
+        }
+        // `gpg --passphrase <pw>` — passphrase supplied on the command line.
+        "gpg" | "gpg2" if has("--passphrase") || has_attached("--passphrase=") => {
+            "a gpg-encrypted file with an inline passphrase"
+        }
+        // `openssl enc -d ... -k <pw>` / `-pass pass:<pw>` / `-K <hexkey>`.
+        "openssl"
+            if has("enc")
+                && (has("-d") || has("--decrypt"))
+                && (has("-k") || has("-pass") || has("-K")) =>
+        {
+            "an openssl-encrypted file with an inline key/passphrase"
+        }
+        _ => return,
+    };
+
+    let off = node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::EncryptedArchiveExtraction,
+        severity: Severity::Warn,
+        confidence: 0.80,
+        message: format!(
+            "extracts/decrypts {} — encrypted payloads with an inline secret evade static inspection",
+            label
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
 /// Commands where a redirect that writes to a same-named file is a strong
 /// indicator of PATH hijacking — the attacker drops a fake binary into a
 /// writable directory that shadows the real command when PATH is modified.
@@ -936,6 +1011,42 @@ mod tests {
             .find(|f| f.kind == SignalKind::DynamicExecution)
             .expect("expected DynamicExecution when command name is a variable");
         assert_eq!(hit.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn unzip_with_inline_password_flags_encrypted_archive() {
+        let findings = run(b"unzip -P \"infected123\" helper.zip\n");
+        let hit = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::EncryptedArchiveExtraction)
+            .expect("expected EncryptedArchiveExtraction finding");
+        assert_eq!(hit.severity, Severity::Warn);
+        assert!(hit.message.contains("unzip -P"));
+    }
+
+    #[test]
+    fn unzip_with_attached_password_flags_encrypted_archive() {
+        // `-Psecret` with the value attached to the flag.
+        let findings = run(b"unzip -Psecret helper.zip\n");
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::EncryptedArchiveExtraction));
+    }
+
+    #[test]
+    fn openssl_decrypt_with_inline_key_flags_encrypted_archive() {
+        let findings = run(b"openssl enc -d -aes-256-cbc -k hunter2 -in p.enc -out p\n");
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::EncryptedArchiveExtraction));
+    }
+
+    #[test]
+    fn plain_unzip_without_password_is_not_flagged() {
+        let findings = run(b"unzip archive.zip\n");
+        assert!(findings
+            .iter()
+            .all(|f| f.kind != SignalKind::EncryptedArchiveExtraction));
     }
 
     #[test]

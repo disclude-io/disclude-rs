@@ -1824,3 +1824,230 @@ fn bash_read_sink_fixture_emits_encoded_dropper_critical() {
         hit.message
     );
 }
+
+// ---------------------------------------------------------------------------
+// Markup / text file types — embedded code extraction + global payload scan.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gha_yaml_run_emits_embedded_bash_finding() {
+    // GitHub Actions `run:` scalars (inline and block) are scanned as Bash:
+    // `curl | bash` (pipe-to-shell) and `eval "$INJECTED"` (dynamic eval).
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "yaml/gha_curl_pipe.yml",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn gitlab_yaml_script_emits_embedded_bash_finding() {
+    // GitLab `script:` sequence items are scanned as Bash; `eval "$CMD"` fires.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "yaml/gitlab_script_eval.yml",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn markdown_python_fence_emits_dynamic_execution() {
+    // A ```python fence containing exec(<non-literal>) is scanned as Python.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "markdown/skill_exec.md",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn markdown_embedded_finding_maps_to_real_line() {
+    // The embedded-block finding must report its location in the *markdown*
+    // file. `exec(data)` sits on line 7 of skill_exec.md.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("markdown/skill_exec.md")
+        })
+        .expect("skill_exec.md fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution)
+        .expect("DynamicExecution finding present");
+    assert_eq!(hit.line, 7, "expected exec() on line 7, got {}", hit.line);
+    assert!(
+        hit.message.contains("[embedded python]"),
+        "expected embedded-origin tag, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn markdown_clean_emits_no_findings() {
+    // Prose plus a non-code ```text fence must not produce findings.
+    let r = run();
+    let clean = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/clean.md"))
+        .expect("clean.md fixture was scanned");
+    assert!(
+        clean.findings.is_empty(),
+        "clean markdown produced findings: {:?}",
+        clean.findings
+    );
+}
+
+#[test]
+fn rst_code_block_emits_embedded_bash_finding() {
+    // `.. code-block:: bash` body (after a `:linenos:` option) is scanned as
+    // Bash; `eval "$REMOTE_CMD"` fires.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "rst/code_block.rst",
+        SignalKind::DynamicExecution
+    ));
+}
+
+#[test]
+fn text_file_bidi_payload_is_scanned() {
+    // Plain .txt gets the global raw payload pass: a bidi override is flagged.
+    let r = run();
+    assert!(has_kind_in(&r, "text/bidi.txt", SignalKind::UnicodeBidi));
+}
+
+#[test]
+fn encrypted_archive_with_inline_password_is_flagged_in_shell() {
+    // `unzip -P "<pw>"` — a password-protected payload that evades inspection.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "bash/encrypted_archive.sh",
+        SignalKind::EncryptedArchiveExtraction
+    ));
+}
+
+#[test]
+fn markdown_obfuscated_eval_base64_flags_both_signals() {
+    // obfuscated.md hides `eval $(echo "<base64>" | base64 -d)` as bare prose.
+    // The prose scan flags the eval-on-substitution (dynamic execution) and the
+    // raw pass independently flags the base64 blob — two complementary signals.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "markdown/obfuscated.md",
+        SignalKind::DynamicExecution
+    ));
+    assert!(has_kind_in(
+        &r,
+        "markdown/obfuscated.md",
+        SignalKind::EncodingBase64
+    ));
+}
+
+#[test]
+fn markdown_obfuscated_eval_is_prose_tagged_and_critical() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("markdown/obfuscated.md")
+        })
+        .expect("obfuscated.md fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution)
+        .expect("expected DynamicExecution from prose scan");
+    assert_eq!(hit.severity, disclude::finding::Severity::Critical);
+    assert!(
+        hit.message.contains("[markup prose]"),
+        "expected prose-origin tag, got: {}",
+        hit.message
+    );
+}
+
+#[test]
+fn markdown_wild_skill_dropper_in_backticks_is_flagged() {
+    // twitter.md is a real-world malicious skill file: its macOS step hides a
+    // `echo '<base64>' | base64 -D | bash` dropper inside backticks under "copy
+    // the command and run it". The pipe-to-shell must fire even though quoted
+    // (it is a dropper, not a documentation example), alongside the base64 blob.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/twitter.md"))
+        .expect("twitter.md fixture was scanned");
+    let pipe = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution && f.message.contains("pipeline feeds into")
+        })
+        .expect("expected pipe-to-shell finding from prose scan");
+    assert!(pipe.message.contains("[markup prose]"));
+    assert!(file
+        .findings
+        .iter()
+        .any(|f| f.kind == SignalKind::EncodingBase64));
+}
+
+#[test]
+fn markdown_backticked_command_examples_do_not_false_positive() {
+    // Commands cited as documentation examples inside inline-code spans or table
+    // cells (e.g. `eval "$VAR"`, `unzip -P <pw>`) must NOT be flagged — only
+    // bare instructions and pipe-to-shell droppers are. The project README is a
+    // worst case: it documents many dangerous commands in backticks and tables.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let readme = PathBuf::from(manifest).join("README.md");
+    let r = scan(&readme, &ScanOptions::default()).expect("scan failed");
+    let prose: Vec<_> = r
+        .files
+        .iter()
+        .flat_map(|fa| &fa.findings)
+        .filter(|f| f.message.contains("[markup prose]"))
+        .collect();
+    assert!(
+        prose.is_empty(),
+        "README documentation examples produced prose findings: {:?}",
+        prose
+            .iter()
+            .map(|f| (f.line, &f.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn markdown_unfenced_command_flagged_via_prose_scan() {
+    // external.md hides its dangerous commands as bare prose (no code fence) to
+    // dodge block extraction. The prose scan must still flag the `unzip -P`.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/external.md"))
+        .expect("external.md fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncryptedArchiveExtraction)
+        .expect("expected EncryptedArchiveExtraction from prose scan");
+    assert!(
+        hit.message.contains("[markup prose]"),
+        "expected prose-origin tag, got: {}",
+        hit.message
+    );
+}

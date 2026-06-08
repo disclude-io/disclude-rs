@@ -234,6 +234,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::DestructiveCommandPayload,
     SignalKind::BashDevTcpSocket,
     SignalKind::PathCommandShadow,
+    SignalKind::EncryptedArchiveExtraction,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -290,6 +291,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::DestructiveCommandPayload => "DestructiveCommandPayload",
         SignalKind::BashDevTcpSocket => "BashDevTcpSocket",
         SignalKind::PathCommandShadow => "PathCommandShadow",
+        SignalKind::EncryptedArchiveExtraction => "EncryptedArchiveExtraction",
     }
 }
 
@@ -406,6 +408,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::PathCommandShadow => {
             "A redirect writes to a file whose name matches a system command, consistent with PATH hijacking to shadow the real binary"
+        }
+        SignalKind::EncryptedArchiveExtraction => {
+            "Extracts or decrypts a password-protected archive with the secret supplied inline — encrypted payloads evade static inspection"
         }
     }
 }

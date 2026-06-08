@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use crate::ast;
 use crate::ast::FileFlags;
 use crate::diff;
+use crate::embedded;
 use crate::finding::{FileAnalysis, ScanResult, Severity};
 use crate::ignore::walk;
 use crate::language::Language;
@@ -163,18 +164,26 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
         complexity_max = max;
     }
 
-    if opts.run_token {
-        findings = token::analyze(path, &bytes, language, &index, findings);
-    }
+    if language.is_markup() {
+        // Markup files have no token/AST pass of their own. Extract embedded
+        // code blocks and run the per-language passes over each slice, mapping
+        // findings back to file coordinates. Raw-pass findings outside any
+        // block are kept as-is — the global payload scan.
+        findings = analyze_markup_blocks(path, &bytes, language, &index, findings, opts);
+    } else {
+        if opts.run_token {
+            findings = token::analyze(path, &bytes, language, &index, findings);
+        }
 
-    if opts.run_ast {
-        let outcome = ast::analyze(path, &bytes, language);
-        findings.extend(outcome.findings);
-        parse_error = outcome.parse_error;
-        file_flags = outcome.file_flags;
-    }
+        if opts.run_ast {
+            let outcome = ast::analyze(path, &bytes, language);
+            findings.extend(outcome.findings);
+            parse_error = outcome.parse_error;
+            file_flags = outcome.file_flags;
+        }
 
-    scorer::elevate(&mut findings, language, file_flags);
+        scorer::elevate(&mut findings, language, file_flags);
+    }
 
     findings.sort_by_key(|f| (f.byte_offset, f.kind.as_str()));
 
@@ -186,4 +195,201 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
         file_complexity_max: complexity_max,
         parse_error,
     }))
+}
+
+/// Token/AST analysis for markup files: extract embedded code blocks, scan each
+/// under its own language, and merge results back into file coordinates.
+///
+/// `raw_findings` are the whole-file raw-pass findings. Those falling inside a
+/// block are handed to that block's token pass (so they get real code-context
+/// reclassification); those outside every block are kept verbatim as the file's
+/// payload-scan findings. Findings emitted from a block are shifted from
+/// block-local offsets back to file offsets and re-located via `file_index`.
+fn analyze_markup_blocks(
+    path: &Path,
+    bytes: &[u8],
+    language: Language,
+    file_index: &LineIndex,
+    raw_findings: Vec<crate::finding::Finding>,
+    opts: &ScanOptions,
+) -> Vec<crate::finding::Finding> {
+    let blocks = embedded::extract(path, bytes, language);
+
+    // Partition raw findings: inside a block (by byte offset) vs. file-level.
+    let mut per_block: Vec<Vec<crate::finding::Finding>> = vec![Vec::new(); blocks.len()];
+    let mut findings: Vec<crate::finding::Finding> = Vec::new();
+    for f in raw_findings {
+        match blocks
+            .iter()
+            .position(|b| f.byte_offset >= b.start && f.byte_offset < b.end)
+        {
+            Some(bi) => per_block[bi].push(f),
+            None => findings.push(f),
+        }
+    }
+
+    for (bi, block) in blocks.iter().enumerate() {
+        let slice = &bytes[block.start..block.end];
+        let local_index = LineIndex::new(slice);
+
+        // Re-anchor the block's raw findings to block-local offsets so the
+        // token pass can reclassify them against the real code structure.
+        let mut block_findings = std::mem::take(&mut per_block[bi]);
+        for f in &mut block_findings {
+            f.byte_offset -= block.start;
+            let (line, col) = local_index.locate(f.byte_offset);
+            f.line = line;
+            f.col = col;
+        }
+
+        if opts.run_token {
+            block_findings = token::analyze(path, slice, block.lang, &local_index, block_findings);
+        }
+
+        let mut file_flags = FileFlags::default();
+        if opts.run_ast {
+            let outcome = ast::analyze(path, slice, block.lang);
+            block_findings.extend(outcome.findings);
+            file_flags = outcome.file_flags;
+        }
+        scorer::elevate(&mut block_findings, block.lang, file_flags);
+
+        // Shift back to file coordinates, re-locate, and tag the origin.
+        let tag = format!("[embedded {}] ", block.lang.as_str());
+        for f in &mut block_findings {
+            f.byte_offset += block.start;
+            let (line, col) = file_index.locate(f.byte_offset);
+            f.line = line;
+            f.col = col;
+            f.message = format!("{}{}", tag, f.message);
+        }
+        findings.extend(block_findings);
+    }
+
+    // Prose scan: malicious instructions in docs are often left *unfenced* to
+    // dodge code-block extraction. For prose-bearing markup (Markdown, RST,
+    // plain text — not YAML, whose shell lives in structured keys we already
+    // extract), run the bash AST line-by-line and keep only high-signal
+    // findings, skipping anything already covered by an extracted block.
+    if opts.run_ast
+        && matches!(
+            language,
+            Language::Markdown | Language::Rst | Language::Text
+        )
+    {
+        findings.extend(prose_high_signal_findings(path, bytes, file_index, &blocks));
+    }
+
+    findings
+}
+
+/// Whether a bash-AST finding is worth surfacing from free-form markup prose.
+/// Restricted to the highest-signal shell behaviors — those that require a
+/// literal dangerous keyword (`eval`, `| bash`, `rm -rf /`, `unzip -P`) — so
+/// that parsing English text and Markdown tables as shell does not generate
+/// noise. In particular the "dynamic command name" form of `DynamicExecution`
+/// (a bare `$VAR` in command position) is excluded: `$`-sigils are pervasive
+/// in prose and would fire constantly.
+fn is_prose_high_signal(f: &crate::finding::Finding) -> bool {
+    use crate::finding::SignalKind::*;
+    match f.kind {
+        DestructiveCommandPayload | EncryptedArchiveExtraction => true,
+        DynamicExecution => !f.message.contains("command name is a variable"),
+        _ => false,
+    }
+}
+
+/// Whether a prose finding may be suppressed when it appears as a documentation
+/// *reference* (inline code span / table cell — see [`is_doc_reference`]).
+///
+/// The only non-suppressible signal is the `… | bash` pipe-to-shell pipeline:
+/// even quoted in a doc it is an unambiguous dropper worth flagging, and the
+/// wild Twitter-skill sample hid exactly such a `… | base64 -D | bash` command
+/// inside backticks under "copy this and run it". Every other form — `eval`/
+/// `exec`/`bash -c` examples, and `unzip -P`/`rm -rf /` cited as examples — is
+/// routinely documented in backticks or tables (disclude's own README does
+/// both), so those are suppressed when they read as a documentation reference
+/// and flagged only when they appear as a bare, copy-pasteable instruction.
+fn is_doc_suppressible(f: &crate::finding::Finding) -> bool {
+    use crate::finding::SignalKind::*;
+    !matches!(f.kind, DynamicExecution if f.message.contains("pipeline feeds into"))
+}
+
+/// Scan markup prose for high-signal shell behavior, line by line.
+///
+/// We deliberately parse each line independently rather than feeding the whole
+/// file to the bash grammar: a real document's `---` frontmatter, `#` headings,
+/// and fenced blocks derail a whole-file bash parse (it degrades to a partial
+/// tree and loses the very pipeline we want — observed on a wild Twitter-skill
+/// sample). Per-line parsing gives each command a clean tree. Offsets are
+/// remapped to the file via `file_index`; findings inside an already-extracted
+/// code block, or that read as documentation references, are dropped.
+fn prose_high_signal_findings(
+    path: &Path,
+    bytes: &[u8],
+    file_index: &LineIndex,
+    blocks: &[embedded::CodeBlock],
+) -> Vec<crate::finding::Finding> {
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let rel_end = bytes[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(bytes.len() - line_start);
+        let line_end = line_start + rel_end;
+        let slice = &bytes[line_start..line_end];
+
+        for mut f in ast::bash::analyze(path, slice).findings {
+            if !is_prose_high_signal(&f) {
+                continue;
+            }
+            let file_off = line_start + f.byte_offset;
+            if blocks
+                .iter()
+                .any(|b| file_off >= b.start && file_off < b.end)
+            {
+                continue;
+            }
+            if is_doc_suppressible(&f) && is_doc_reference(bytes, file_off) {
+                continue;
+            }
+            f.byte_offset = file_off;
+            let (line, col) = file_index.locate(file_off);
+            f.line = line;
+            f.col = col;
+            f.message = format!("[markup prose] {}", f.message);
+            out.push(f);
+        }
+
+        line_start = line_end + 1;
+    }
+    out
+}
+
+/// Heuristic: is the command at `offset` a documentation *reference* rather than
+/// an executable *instruction*? Docs cite commands inside `` `inline code` ``
+/// spans and Markdown table cells; malicious instructions are typically bare,
+/// copy-pasteable prose. Excluding code spans and table rows removes the common
+/// false positive of a README that documents a dangerous command as an example.
+fn is_doc_reference(bytes: &[u8], offset: usize) -> bool {
+    let line_start = bytes[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    // Markdown table row: the line's first non-space byte is a pipe.
+    let first = bytes[line_start..offset]
+        .iter()
+        .find(|&&b| !b.is_ascii_whitespace());
+    if first == Some(&b'|') {
+        return true;
+    }
+    // Inline code span: an odd number of backticks precede the offset on this
+    // line, so the offset sits between an opening and closing backtick.
+    let backticks = bytes[line_start..offset]
+        .iter()
+        .filter(|&&b| b == b'`')
+        .count();
+    backticks % 2 == 1
 }

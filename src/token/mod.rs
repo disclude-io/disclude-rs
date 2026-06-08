@@ -93,6 +93,9 @@ fn tokenize(bytes: &[u8], lang: Language) -> Vec<Token> {
         Language::Python => python::tokenize(bytes),
         Language::Rust => rust::tokenize(bytes),
         Language::TypeScript | Language::JavaScript => typescript::tokenize(bytes),
+        // Markup languages have no token pass of their own; embedded code
+        // blocks are tokenized under their resolved code language instead.
+        Language::Text | Language::Markdown | Language::Yaml | Language::Rst => Vec::new(),
     }
 }
 
@@ -256,6 +259,8 @@ fn is_conventional_short(ident: &str, lang: Language) -> bool {
         Language::Python => ident.starts_with("__") && ident.ends_with("__"),
         Language::Rust => ident.starts_with('_'),
         Language::TypeScript | Language::JavaScript => ident.starts_with('$'),
+        // Markup languages emit no identifier tokens; unreachable in practice.
+        Language::Text | Language::Markdown | Language::Yaml | Language::Rst => false,
     }
 }
 
