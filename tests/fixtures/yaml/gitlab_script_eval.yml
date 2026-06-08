@@ -1,0 +1,7 @@
+build-job:
+  stage: build
+  before_script:
+    - echo "preparing"
+  script:
+    - eval "$CMD"
+    - echo "done"
