@@ -214,9 +214,6 @@ fn analyze_markup_blocks(
     opts: &ScanOptions,
 ) -> Vec<crate::finding::Finding> {
     let blocks = embedded::extract(path, bytes, language);
-    if blocks.is_empty() {
-        return raw_findings;
-    }
 
     // Partition raw findings: inside a block (by byte offset) vs. file-level.
     let mut per_block: Vec<Vec<crate::finding::Finding>> = vec![Vec::new(); blocks.len()];
@@ -269,5 +266,82 @@ fn analyze_markup_blocks(
         findings.extend(block_findings);
     }
 
+    // Prose scan: malicious instructions in docs are often left *unfenced* to
+    // dodge code-block extraction. For prose-bearing markup (Markdown, RST,
+    // plain text — not YAML, whose shell lives in structured keys we already
+    // extract), run the bash AST over the whole file and keep only high-signal
+    // findings, skipping anything already covered by an extracted block.
+    if opts.run_ast && matches!(language, Language::Markdown | Language::Rst | Language::Text) {
+        findings.extend(prose_high_signal_findings(path, bytes, &blocks));
+    }
+
     findings
+}
+
+/// Whether a bash-AST finding is worth surfacing from free-form markup prose.
+/// Restricted to the highest-signal shell behaviors — those that require a
+/// literal dangerous keyword (`eval`, `| bash`, `rm -rf /`, `unzip -P`) — so
+/// that parsing English text and Markdown tables as shell does not generate
+/// noise. In particular the "dynamic command name" form of `DynamicExecution`
+/// (a bare `$VAR` in command position) is excluded: `$`-sigils are pervasive
+/// in prose and would fire constantly.
+fn is_prose_high_signal(f: &crate::finding::Finding) -> bool {
+    use crate::finding::SignalKind::*;
+    match f.kind {
+        DestructiveCommandPayload | EncryptedArchiveExtraction => true,
+        DynamicExecution => !f.message.contains("command name is a variable"),
+        _ => false,
+    }
+}
+
+/// Run the bash AST over an entire markup file and return its high-signal
+/// findings that fall outside any already-extracted code block. Offsets are
+/// file-relative (the whole file is parsed), so no remapping is needed.
+fn prose_high_signal_findings(
+    path: &Path,
+    bytes: &[u8],
+    blocks: &[embedded::CodeBlock],
+) -> Vec<crate::finding::Finding> {
+    ast::bash::analyze(path, bytes)
+        .findings
+        .into_iter()
+        .filter(is_prose_high_signal)
+        .filter(|f| {
+            !blocks
+                .iter()
+                .any(|b| f.byte_offset >= b.start && f.byte_offset < b.end)
+        })
+        .filter(|f| !is_doc_reference(bytes, f.byte_offset))
+        .map(|mut f| {
+            f.message = format!("[markup prose] {}", f.message);
+            f
+        })
+        .collect()
+}
+
+/// Heuristic: is the command at `offset` a documentation *reference* rather than
+/// an executable *instruction*? Docs cite commands inside `` `inline code` ``
+/// spans and Markdown table cells; malicious instructions are typically bare,
+/// copy-pasteable prose. Excluding code spans and table rows removes the common
+/// false positive of a README that documents a dangerous command as an example.
+fn is_doc_reference(bytes: &[u8], offset: usize) -> bool {
+    let line_start = bytes[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    // Markdown table row: the line's first non-space byte is a pipe.
+    let first = bytes[line_start..offset]
+        .iter()
+        .find(|&&b| !b.is_ascii_whitespace());
+    if first == Some(&b'|') {
+        return true;
+    }
+    // Inline code span: an odd number of backticks precede the offset on this
+    // line, so the offset sits between an opening and closing backtick.
+    let backticks = bytes[line_start..offset]
+        .iter()
+        .filter(|&&b| b == b'`')
+        .count();
+    backticks % 2 == 1
 }

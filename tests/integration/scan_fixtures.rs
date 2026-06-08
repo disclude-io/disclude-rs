@@ -1924,3 +1924,36 @@ fn text_file_bidi_payload_is_scanned() {
     let r = run();
     assert!(has_kind_in(&r, "text/bidi.txt", SignalKind::UnicodeBidi));
 }
+
+#[test]
+fn encrypted_archive_with_inline_password_is_flagged_in_shell() {
+    // `unzip -P "<pw>"` — a password-protected payload that evades inspection.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "bash/encrypted_archive.sh",
+        SignalKind::EncryptedArchiveExtraction
+    ));
+}
+
+#[test]
+fn markdown_unfenced_command_flagged_via_prose_scan() {
+    // external.md hides its dangerous commands as bare prose (no code fence) to
+    // dodge block extraction. The prose scan must still flag the `unzip -P`.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/external.md"))
+        .expect("external.md fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncryptedArchiveExtraction)
+        .expect("expected EncryptedArchiveExtraction from prose scan");
+    assert!(
+        hit.message.contains("[markup prose]"),
+        "expected prose-origin tag, got: {}",
+        hit.message
+    );
+}

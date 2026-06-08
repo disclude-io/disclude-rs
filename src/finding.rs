@@ -70,6 +70,7 @@ pub enum SignalKind {
     DestructiveCommandPayload,
     BashDevTcpSocket,
     PathCommandShadow,
+    EncryptedArchiveExtraction,
 }
 
 impl SignalKind {
@@ -127,6 +128,7 @@ impl SignalKind {
             SignalKind::DestructiveCommandPayload => "destructive-command-payload",
             SignalKind::BashDevTcpSocket => "bash-dev-tcp-socket",
             SignalKind::PathCommandShadow => "path-command-shadow",
+            SignalKind::EncryptedArchiveExtraction => "encrypted-archive-extraction",
         }
     }
 }

@@ -245,6 +245,7 @@ AST pass; tree-sitter.
 | `dynamic-execution` | critical / warn | `eval` called with a dynamic argument — variable expansion (`eval "$VAR"`), command substitution (`eval $(cmd)`), or a word containing variable references (critical). `eval` called with a plain string literal (warn). Also fires when `exec` is called with a variable as the binary path (`exec $cmd`), since the executed binary is unknown statically (critical). |
 | `dynamic-import` | warn | `source $path` or `. $path` where the path contains a variable — the sourced file is determined at runtime. |
 | `dynamic-execution` (pipeline) | warn | A pipeline ending with `bash`, `sh`, `ksh`, or `zsh` — the classic "pipe to shell" dropper pattern (`curl … \| bash`). Downloads and immediately executes arbitrary code without inspection. |
+| `encrypted-archive-extraction` | warn | Extracts or decrypts a password-protected archive with the secret supplied inline: `unzip -P <pw>`, `7z -p<pw>`, `gpg --passphrase <pw>`, `openssl enc -d … -k/-pass`. Shipping the password alongside an encrypted payload lets it auto-unpack at runtime while the encrypted blob evades static inspection. |
 
 **Examples:**
 
@@ -307,6 +308,10 @@ AST pass; language-specific.
 ### 1.6.0
 
 Support for text and structured-markup files: `.txt`, `.md`, `.yaml`, `.rst`. These are scanned for hidden payloads by the raw pass, and embedded code is extracted and run through the language-specific token/AST checks — shell in GitHub Actions / GitLab CI / Ansible YAML, fenced code blocks in Markdown, and `code-block` directives in reStructuredText. Findings are reported at their location in the markup file and tagged with the embedded language.
+
+For Markdown, reStructuredText, and plain text, high-signal shell checks also run over the prose itself (not just fenced code), so dangerous commands left *unfenced* to dodge extraction are still caught (tagged `[markup prose]`). Commands cited inside inline-code spans or Markdown table cells are treated as documentation references and skipped.
+
+New `encrypted-archive-extraction` signal: extracting or decrypting a password-protected archive with the secret supplied inline (`unzip -P`, `7z -p`, `gpg --passphrase`, `openssl enc -d -k/-pass`) — a common way to smuggle a payload past static scanners.
 
 
 ### 1.5.0
