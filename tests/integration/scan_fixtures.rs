@@ -1980,6 +1980,57 @@ fn markdown_obfuscated_eval_is_prose_tagged_and_critical() {
 }
 
 #[test]
+fn markdown_wild_skill_dropper_in_backticks_is_flagged() {
+    // twitter.md is a real-world malicious skill file: its macOS step hides a
+    // `echo '<base64>' | base64 -D | bash` dropper inside backticks under "copy
+    // the command and run it". The pipe-to-shell must fire even though quoted
+    // (it is a dropper, not a documentation example), alongside the base64 blob.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/twitter.md"))
+        .expect("twitter.md fixture was scanned");
+    let pipe = file
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == SignalKind::DynamicExecution && f.message.contains("pipeline feeds into")
+        })
+        .expect("expected pipe-to-shell finding from prose scan");
+    assert!(pipe.message.contains("[markup prose]"));
+    assert!(file
+        .findings
+        .iter()
+        .any(|f| f.kind == SignalKind::EncodingBase64));
+}
+
+#[test]
+fn markdown_backticked_command_examples_do_not_false_positive() {
+    // Commands cited as documentation examples inside inline-code spans or table
+    // cells (e.g. `eval "$VAR"`, `unzip -P <pw>`) must NOT be flagged — only
+    // bare instructions and pipe-to-shell droppers are. The project README is a
+    // worst case: it documents many dangerous commands in backticks and tables.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let readme = PathBuf::from(manifest).join("README.md");
+    let r = scan(&readme, &ScanOptions::default()).expect("scan failed");
+    let prose: Vec<_> = r
+        .files
+        .iter()
+        .flat_map(|fa| &fa.findings)
+        .filter(|f| f.message.contains("[markup prose]"))
+        .collect();
+    assert!(
+        prose.is_empty(),
+        "README documentation examples produced prose findings: {:?}",
+        prose
+            .iter()
+            .map(|f| (f.line, &f.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn markdown_unfenced_command_flagged_via_prose_scan() {
     // external.md hides its dangerous commands as bare prose (no code fence) to
     // dodge block extraction. The prose scan must still flag the `unzip -P`.

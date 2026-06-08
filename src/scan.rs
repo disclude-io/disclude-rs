@@ -269,7 +269,7 @@ fn analyze_markup_blocks(
     // Prose scan: malicious instructions in docs are often left *unfenced* to
     // dodge code-block extraction. For prose-bearing markup (Markdown, RST,
     // plain text — not YAML, whose shell lives in structured keys we already
-    // extract), run the bash AST over the whole file and keep only high-signal
+    // extract), run the bash AST line-by-line and keep only high-signal
     // findings, skipping anything already covered by an extracted block.
     if opts.run_ast
         && matches!(
@@ -277,7 +277,7 @@ fn analyze_markup_blocks(
             Language::Markdown | Language::Rst | Language::Text
         )
     {
-        findings.extend(prose_high_signal_findings(path, bytes, &blocks));
+        findings.extend(prose_high_signal_findings(path, bytes, file_index, &blocks));
     }
 
     findings
@@ -299,29 +299,72 @@ fn is_prose_high_signal(f: &crate::finding::Finding) -> bool {
     }
 }
 
-/// Run the bash AST over an entire markup file and return its high-signal
-/// findings that fall outside any already-extracted code block. Offsets are
-/// file-relative (the whole file is parsed), so no remapping is needed.
+/// Whether a prose finding may be suppressed when it appears as a documentation
+/// *reference* (inline code span / table cell — see [`is_doc_reference`]).
+///
+/// The only non-suppressible signal is the `… | bash` pipe-to-shell pipeline:
+/// even quoted in a doc it is an unambiguous dropper worth flagging, and the
+/// wild Twitter-skill sample hid exactly such a `… | base64 -D | bash` command
+/// inside backticks under "copy this and run it". Every other form — `eval`/
+/// `exec`/`bash -c` examples, and `unzip -P`/`rm -rf /` cited as examples — is
+/// routinely documented in backticks or tables (disclude's own README does
+/// both), so those are suppressed when they read as a documentation reference
+/// and flagged only when they appear as a bare, copy-pasteable instruction.
+fn is_doc_suppressible(f: &crate::finding::Finding) -> bool {
+    use crate::finding::SignalKind::*;
+    !matches!(f.kind, DynamicExecution if f.message.contains("pipeline feeds into"))
+}
+
+/// Scan markup prose for high-signal shell behavior, line by line.
+///
+/// We deliberately parse each line independently rather than feeding the whole
+/// file to the bash grammar: a real document's `---` frontmatter, `#` headings,
+/// and fenced blocks derail a whole-file bash parse (it degrades to a partial
+/// tree and loses the very pipeline we want — observed on a wild Twitter-skill
+/// sample). Per-line parsing gives each command a clean tree. Offsets are
+/// remapped to the file via `file_index`; findings inside an already-extracted
+/// code block, or that read as documentation references, are dropped.
 fn prose_high_signal_findings(
     path: &Path,
     bytes: &[u8],
+    file_index: &LineIndex,
     blocks: &[embedded::CodeBlock],
 ) -> Vec<crate::finding::Finding> {
-    ast::bash::analyze(path, bytes)
-        .findings
-        .into_iter()
-        .filter(is_prose_high_signal)
-        .filter(|f| {
-            !blocks
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let rel_end = bytes[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(bytes.len() - line_start);
+        let line_end = line_start + rel_end;
+        let slice = &bytes[line_start..line_end];
+
+        for mut f in ast::bash::analyze(path, slice).findings {
+            if !is_prose_high_signal(&f) {
+                continue;
+            }
+            let file_off = line_start + f.byte_offset;
+            if blocks
                 .iter()
-                .any(|b| f.byte_offset >= b.start && f.byte_offset < b.end)
-        })
-        .filter(|f| !is_doc_reference(bytes, f.byte_offset))
-        .map(|mut f| {
+                .any(|b| file_off >= b.start && file_off < b.end)
+            {
+                continue;
+            }
+            if is_doc_suppressible(&f) && is_doc_reference(bytes, file_off) {
+                continue;
+            }
+            f.byte_offset = file_off;
+            let (line, col) = file_index.locate(file_off);
+            f.line = line;
+            f.col = col;
             f.message = format!("[markup prose] {}", f.message);
-            f
-        })
-        .collect()
+            out.push(f);
+        }
+
+        line_start = line_end + 1;
+    }
+    out
 }
 
 /// Heuristic: is the command at `offset` a documentation *reference* rather than
