@@ -134,8 +134,7 @@ fn collect(node: Node, bytes: &[u8], out: &mut Vec<(usize, usize)>) {
             }
         }
         // Descend through wrappers and sequences.
-        "flow_node" | "block_node" | "block_sequence" | "block_sequence_item"
-        | "flow_sequence" => {
+        "flow_node" | "block_node" | "block_sequence" | "block_sequence_item" | "flow_sequence" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 // Skip structural punctuation tokens (e.g. the `-` item marker).

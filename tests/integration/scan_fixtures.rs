@@ -1871,7 +1871,11 @@ fn markdown_embedded_finding_maps_to_real_line() {
     let file = r
         .files
         .iter()
-        .find(|fa| fa.path.to_string_lossy().ends_with("markdown/skill_exec.md"))
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("markdown/skill_exec.md")
+        })
         .expect("skill_exec.md fixture was scanned");
     let hit = file
         .findings

@@ -50,9 +50,7 @@ pub fn extract(bytes: &[u8]) -> Vec<CodeBlock> {
                     break; // dedent: block over
                 }
                 // Leading directive options (`:name: value`) precede content.
-                if content_start.is_none()
-                    && trimmed.starts_with(':')
-                    && trimmed[1..].contains(':')
+                if content_start.is_none() && trimmed.starts_with(':') && trimmed[1..].contains(':')
                 {
                     li += 1;
                     continue;

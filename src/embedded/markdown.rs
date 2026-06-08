@@ -13,7 +13,10 @@ use crate::language::Language;
 
 pub fn extract(bytes: &[u8]) -> Vec<CodeBlock> {
     let mut parser = Parser::new();
-    if parser.set_language(&tree_sitter_md::LANGUAGE.into()).is_err() {
+    if parser
+        .set_language(&tree_sitter_md::LANGUAGE.into())
+        .is_err()
+    {
         return Vec::new();
     }
     let Some(tree) = parser.parse(bytes, None) else {
