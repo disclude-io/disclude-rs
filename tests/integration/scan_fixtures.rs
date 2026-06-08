@@ -1937,6 +1937,49 @@ fn encrypted_archive_with_inline_password_is_flagged_in_shell() {
 }
 
 #[test]
+fn markdown_obfuscated_eval_base64_flags_both_signals() {
+    // obfuscated.md hides `eval $(echo "<base64>" | base64 -d)` as bare prose.
+    // The prose scan flags the eval-on-substitution (dynamic execution) and the
+    // raw pass independently flags the base64 blob — two complementary signals.
+    let r = run();
+    assert!(has_kind_in(
+        &r,
+        "markdown/obfuscated.md",
+        SignalKind::DynamicExecution
+    ));
+    assert!(has_kind_in(
+        &r,
+        "markdown/obfuscated.md",
+        SignalKind::EncodingBase64
+    ));
+}
+
+#[test]
+fn markdown_obfuscated_eval_is_prose_tagged_and_critical() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("markdown/obfuscated.md")
+        })
+        .expect("obfuscated.md fixture was scanned");
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution)
+        .expect("expected DynamicExecution from prose scan");
+    assert_eq!(hit.severity, disclude::finding::Severity::Critical);
+    assert!(
+        hit.message.contains("[markup prose]"),
+        "expected prose-origin tag, got: {}",
+        hit.message
+    );
+}
+
+#[test]
 fn markdown_unfenced_command_flagged_via_prose_scan() {
     // external.md hides its dangerous commands as bare prose (no code fence) to
     // dodge block extraction. The prose scan must still flag the `unzip -P`.

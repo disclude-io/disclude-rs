@@ -569,11 +569,16 @@ fn check_encrypted_archive(
         .collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
     // A short flag with its value attached, e.g. `-Psecret`, `-psecret`.
-    let has_attached = |prefix: &str| args.iter().any(|a| a.len() > prefix.len() && a.starts_with(prefix));
+    let has_attached = |prefix: &str| {
+        args.iter()
+            .any(|a| a.len() > prefix.len() && a.starts_with(prefix))
+    };
 
     let label = match name.as_str() {
         // `unzip -P <password>` (value may be attached or the next argument).
-        "unzip" if has("-P") || has_attached("-P") => "a password-protected zip archive (`unzip -P`)",
+        "unzip" if has("-P") || has_attached("-P") => {
+            "a password-protected zip archive (`unzip -P`)"
+        }
         // `7z x -p<password>` — the 7-Zip password flag attaches its value.
         "7z" | "7za" | "7zr" if has("-p") || has_attached("-p") => {
             "a password-protected 7-Zip archive (`7z -p`)"

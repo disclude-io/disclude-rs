@@ -271,7 +271,12 @@ fn analyze_markup_blocks(
     // plain text — not YAML, whose shell lives in structured keys we already
     // extract), run the bash AST over the whole file and keep only high-signal
     // findings, skipping anything already covered by an extracted block.
-    if opts.run_ast && matches!(language, Language::Markdown | Language::Rst | Language::Text) {
+    if opts.run_ast
+        && matches!(
+            language,
+            Language::Markdown | Language::Rst | Language::Text
+        )
+    {
         findings.extend(prose_high_signal_findings(path, bytes, &blocks));
     }
 
