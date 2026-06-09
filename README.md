@@ -305,14 +305,11 @@ AST pass; language-specific.
 ## What is New
 
 
-### 1.6.0
+### 2.0.0
 
-Support for text and structured-markup files: `.txt`, `.md`, `.yaml`, `.rst`. These are scanned for hidden payloads by the raw pass, and embedded code is extracted and run through the language-specific token/AST checks — shell in GitHub Actions / GitLab CI / Ansible YAML, fenced code blocks in Markdown, and `code-block` directives in reStructuredText. Findings are reported at their location in the markup file and tagged with the embedded language.
+Support for text and structured-markup files: `.txt`, `.md`, `.yaml`, `.rst`, which are scanned for hidden payloads. Embedded code is extracted and run through the language-specific checks.
 
-For Markdown, reStructuredText, and plain text, high-signal shell checks also run over the prose itself (not just fenced code), so dangerous commands left *unfenced* to dodge extraction are still caught (tagged `[markup prose]`). Commands cited inside inline-code spans or Markdown table cells are treated as documentation references and skipped to avoid noise — except a `… | bash` pipe-to-shell pipeline, which is flagged even when quoted, since malicious skill files hide droppers in backticks under "copy this command and run it".
-
-New `encrypted-archive-extraction` signal: extracting or decrypting a password-protected archive with the secret supplied inline (`unzip -P`, `7z -p`, `gpg --passphrase`, `openssl enc -d -k/-pass`) — a common way to smuggle a payload past static scanners.
-
+New `encrypted-archive-extraction` signal: extracting or decrypting a password-protected archive with the secret supplied inline (`unzip -P`, `7z -p`, `gpg --passphrase`, `openssl enc -d -k/-pass`)
 
 ### 1.5.0
 
