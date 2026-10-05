@@ -296,6 +296,45 @@ fn ts_tag_smuggling_fixture_emits_unicode_surrogate() {
 }
 
 #[test]
+fn typescript_reversed_decode_fixture_emits_reversed_decode_input() {
+    // reversed_decode.js stores a base64-of-zlib payload backwards, then
+    // reverses it into both `Buffer.from(…, "base64")` and `atob`, and runs
+    // the inflated result through `new Function`.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("typescript/reversed_decode.js")
+        })
+        .expect("typescript/reversed_decode.js fixture was scanned");
+    let hits: Vec<_> = file
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::ReversedDecodeInput)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        2,
+        "expected two reversed-decode-input findings: {:?}",
+        hits
+    );
+    for decoder in ["Buffer.from", "atob"] {
+        assert!(
+            hits.iter().any(|f| f.message.contains(decoder)),
+            "expected a reversed-decode-input finding citing `{}`: {:?}",
+            decoder,
+            hits
+        );
+    }
+    assert!(hits
+        .iter()
+        .all(|f| f.severity == disclude::finding::Severity::Warn));
+}
+
+#[test]
 fn c_bonsai_fixture_emits_numeric_literal_payload() {
     // bonsai.c hides bytes inside a `double O[19]` array and reads them via
     // `((char*)&O[_])[r()]` and `((char*)(O+14))`. The C AST pass should fire
@@ -597,6 +636,67 @@ fn python_multi_stage_fixture_emits_three_signals() {
         "expected module-scope wording in message, got: {}",
         dynx.message
     );
+}
+
+#[test]
+fn python_pvtapi_fixture_emits_one_liner_loader_signals() {
+    // pvtapi.py is a one-line loader: a lambda that reverses a multi-KB
+    // base64 literal, then base64-decodes, zlib-decompresses, and
+    // marshal-loads it, with every module reached via `__import__('...')`
+    // rather than an import statement. The result is exec'd at module scope.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("python/pvtapi.py"))
+        .expect("python/pvtapi.py fixture was scanned");
+    let find = |kind: SignalKind| {
+        file.findings
+            .iter()
+            .find(|f| f.kind == kind)
+            .unwrap_or_else(|| panic!("expected {:?} on pvtapi.py: {:?}", kind, file.findings))
+    };
+
+    let exec = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("module scope"))
+        .expect("expected module-scope exec on pvtapi.py");
+    assert_eq!(exec.severity, disclude::finding::Severity::Critical);
+
+    assert!(
+        file.findings.iter().any(|f| {
+            f.kind == SignalKind::DynamicExecution && f.message.contains("marshal.loads")
+        }),
+        "expected marshal.loads sink resolved through __import__: {:?}",
+        file.findings
+    );
+
+    let reversed = find(SignalKind::ReversedDecodeInput);
+    assert!(
+        reversed.message.contains("b64decode") && reversed.message.contains("[::-1]"),
+        "unexpected reversed-decode-input message: {}",
+        reversed.message
+    );
+
+    let blob = find(SignalKind::EncodingBase64);
+    assert_eq!(blob.severity, disclude::finding::Severity::Warn);
+
+    for kind in [
+        SignalKind::DecoderImportWithExec,
+        SignalKind::DecoderDecompressPayload,
+    ] {
+        let dec = find(kind);
+        for module in ["marshal", "zlib", "base64"] {
+            assert!(
+                dec.message.contains(module),
+                "expected `{}` cited in {:?} message, got: {}",
+                module,
+                kind,
+                dec.message
+            );
+        }
+    }
 }
 
 #[test]

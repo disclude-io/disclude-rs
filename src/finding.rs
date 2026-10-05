@@ -71,6 +71,7 @@ pub enum SignalKind {
     BashDevTcpSocket,
     PathCommandShadow,
     EncryptedArchiveExtraction,
+    ReversedDecodeInput,
 }
 
 impl SignalKind {
@@ -129,6 +130,7 @@ impl SignalKind {
             SignalKind::BashDevTcpSocket => "bash-dev-tcp-socket",
             SignalKind::PathCommandShadow => "path-command-shadow",
             SignalKind::EncryptedArchiveExtraction => "encrypted-archive-extraction",
+            SignalKind::ReversedDecodeInput => "reversed-decode-input",
         }
     }
 }

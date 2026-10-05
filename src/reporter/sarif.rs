@@ -235,6 +235,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::BashDevTcpSocket,
     SignalKind::PathCommandShadow,
     SignalKind::EncryptedArchiveExtraction,
+    SignalKind::ReversedDecodeInput,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -292,6 +293,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::BashDevTcpSocket => "BashDevTcpSocket",
         SignalKind::PathCommandShadow => "PathCommandShadow",
         SignalKind::EncryptedArchiveExtraction => "EncryptedArchiveExtraction",
+        SignalKind::ReversedDecodeInput => "ReversedDecodeInput",
     }
 }
 
@@ -411,6 +413,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::EncryptedArchiveExtraction => {
             "Extracts or decrypts a password-protected archive with the secret supplied inline — encrypted payloads evade static inspection"
+        }
+        SignalKind::ReversedDecodeInput => {
+            "Input is reversed before being decoded or decompressed — hides an encoded payload from signature and prefix matching"
         }
     }
 }

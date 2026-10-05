@@ -46,6 +46,10 @@ fn compression_ratio(bytes: &[u8]) -> f32 {
     compress(bytes) as f32 / bytes.len() as f32
 }
 
+const BASE64_LONG_SPAN: usize = 256;
+const BASE64_SHORT_MIN_RATIO: f32 = 0.85;
+const BASE64_LONG_MIN_RATIO: f32 = 0.70;
+
 fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut i = 0;
@@ -83,8 +87,19 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
         if !(has_upper && has_lower && has_digit) {
             continue;
         }
+        // Reject repetitive spans that zlib squeezes well. Random base64
+        // carries 6 bits per 8-bit char, so long blobs converge on a ratio
+        // of ~0.75; the floor for those must sit below that asymptote or
+        // large payloads go unseen. Short spans keep a stricter floor, since
+        // zlib's fixed overhead inflates their ratio (random 64-char base64
+        // sits near 1.1) and a lenient floor admits repetitive identifiers.
         let ratio = compression_ratio(span);
-        if ratio < 0.85 {
+        let min_ratio = if len >= BASE64_LONG_SPAN {
+            BASE64_LONG_MIN_RATIO
+        } else {
+            BASE64_SHORT_MIN_RATIO
+        };
+        if ratio < min_ratio {
             continue;
         }
 
@@ -422,6 +437,65 @@ mod tests {
         }
         let h = shannon_entropy(&hist, 16);
         assert!((h - 4.0).abs() < 0.01, "expected ~4.0 bits, got {}", h);
+    }
+
+    /// Deterministic pseudo-random base64 text (LCG over the alphabet), so
+    /// the test exercises an incompressible blob without a `rand` dependency.
+    fn pseudo_random_base64(len: usize) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ALPHABET[(state >> 58) as usize] as char
+            })
+            .collect()
+    }
+
+    #[test]
+    fn flags_large_base64_blob() {
+        // Random base64 compresses to ~0.75 once zlib's fixed overhead is
+        // amortized; a multi-KB payload must not slip under the ratio floor.
+        let src = format!("data = b'{}'\n", pseudo_random_base64(4096));
+        let findings = run(src.as_bytes());
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == SignalKind::EncodingBase64),
+            "expected base64 finding on 4 KB blob, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn short_low_ratio_span_is_ignored() {
+        // Hex-like identifier with a stray capital: mixed case and digits,
+        // but repetitive enough to compress to ~0.71.
+        let span = "Ree183a1e18390e183ade1839be18394e1839ae18390e183935fe18392e18394e1839b";
+        let src = format!("s = \"{}\"\n", span);
+        let findings = run(src.as_bytes());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::EncodingBase64),
+            "short repetitive span must not trigger base64: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn repetitive_base64_alphabet_span_is_ignored() {
+        let src = format!("data = \"{}\"\n", "Ab1Cd2Ef3Gh4".repeat(64));
+        let findings = run(src.as_bytes());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::EncodingBase64),
+            "repetitive span must not trigger base64: {:?}",
+            findings
+        );
     }
 
     #[test]

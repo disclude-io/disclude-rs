@@ -105,6 +105,8 @@ fn check_call(
     // Which callable?
     let short = callee_short_name(func, bytes);
     let qualified = callee_qualified_name(func, bytes);
+    // Resolves `__import__("marshal").loads` to `marshal.loads`.
+    let resolved = resolve_qualified_name_with_import(func, bytes).map(|(name, _)| name);
 
     match short.as_deref() {
         Some(name @ ("exec" | "eval" | "compile")) if func.kind() == "identifier" => {
@@ -162,13 +164,13 @@ fn check_call(
     // `vars()` base. tree-sitter-python exposes the subscript form as
     // `subscript` with a `value` field that is the base expression and a
     // `subscript` field that is the index.
+    if let Some(name @ ("marshal.loads" | "marshal.load")) = resolved.as_deref() {
+        if let Some(arg) = args.first() {
+            emit_marshal_loads(node, *arg, bytes, path, index, findings, name);
+        }
+    }
     if let Some(name) = qualified.as_deref() {
         match name {
-            "marshal.loads" | "marshal.load" => {
-                if let Some(arg) = args.first() {
-                    emit_marshal_loads(node, *arg, bytes, path, index, findings, name);
-                }
-            }
             "globals.get" | "vars.get" | "locals.get" => {
                 if let Some(arg) = args.first() {
                     if !is_literal_expression(*arg, bytes) {
@@ -178,6 +180,10 @@ fn check_call(
             }
             _ => {}
         }
+    }
+
+    if let Some(arg) = args.first() {
+        check_reversed_decode_input(node, func, *arg, bytes, path, index, findings);
     }
 
     // Python shell/process spawn family: os.system, os.popen, os.spawn*,
@@ -218,6 +224,118 @@ fn emit_marshal_loads(
         snippet: redact_snippet(&snippet_around(bytes, off, 100)),
         diff_introduced: false,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Reversed-decode-input detector
+// ---------------------------------------------------------------------------
+//
+// `base64.b64decode(blob[::-1])` stores the payload backwards so it matches
+// neither signatures nor the telltale prefixes of encoded data (`eJ` for
+// base64-of-zlib, `H4sI` for base64-of-gzip). Reversing data immediately
+// before decoding it has no ordinary use.
+
+/// Decoders whose input is encoded text or compressed bytes. Matched on the
+/// callee's short name, so `base64.b64decode`, `b64decode`, and
+/// `__import__('base64').b64decode` all qualify.
+const REVERSIBLE_DECODERS: &[&str] = &[
+    "b64decode",
+    "b32decode",
+    "b16decode",
+    "b85decode",
+    "a85decode",
+    "urlsafe_b64decode",
+    "decodebytes",
+    "decodestring",
+    "a2b_base64",
+    "a2b_hex",
+    "unhexlify",
+    "fromhex",
+    "decompress",
+];
+
+fn check_reversed_decode_input(
+    call_node: Node,
+    func: Node,
+    arg: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(decoder) = callee_short_name(func, bytes) else {
+        return;
+    };
+    // Names shared with unrelated APIs only count with a decoder receiver:
+    // `codecs.decode(x, "base64")` but not `text.decode()`, and
+    // `marshal.loads(x)` but not `json.loads(x)`.
+    let qualified = resolve_qualified_name_with_import(func, bytes).map(|(name, _)| name);
+    let is_decoder = REVERSIBLE_DECODERS.contains(&decoder.as_str())
+        || matches!(
+            qualified.as_deref(),
+            Some("codecs.decode" | "marshal.loads" | "pickle.loads")
+        );
+    if !is_decoder {
+        return;
+    }
+    let Some(form) = reversal_form(arg, bytes) else {
+        return;
+    };
+    let off = call_node.start_byte();
+    let (line, col) = index.locate(off);
+    findings.push(Finding {
+        path: path.to_path_buf(),
+        byte_offset: off,
+        line,
+        col,
+        pass: PassKind::Ast,
+        kind: SignalKind::ReversedDecodeInput,
+        severity: Severity::Warn,
+        confidence: 0.85,
+        message: format!(
+            "`{}` decodes input reversed with `{}` — payload stored backwards to evade signature matching",
+            decoder, form
+        ),
+        snippet: redact_snippet(&snippet_around(bytes, off, 100)),
+        diff_introduced: false,
+    });
+}
+
+/// If `node` reverses a sequence, returns a short label for the idiom used.
+/// Looks through a trailing `.encode(...)` so `b64decode(s[::-1].encode())`
+/// is recognized.
+fn reversal_form(node: Node, bytes: &[u8]) -> Option<&'static str> {
+    match node.kind() {
+        "subscript" => {
+            let slice = node.child_by_field_name("subscript")?;
+            if slice.kind() != "slice" {
+                return None;
+            }
+            let compact: String = node_text(slice, bytes)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            (compact == "::-1").then_some("[::-1]")
+        }
+        "call" => {
+            let func = node.child_by_field_name("function")?;
+            let args = positional_args(node.child_by_field_name("arguments")?);
+            match callee_short_name(func, bytes).as_deref()? {
+                "reversed" if func.kind() == "identifier" => Some("reversed()"),
+                // `"".join(reversed(x))` / `bytes(reversed(x))`
+                "join" | "bytes" | "bytearray" => args
+                    .first()
+                    .and_then(|a| reversal_form(*a, bytes))
+                    .filter(|f| *f == "reversed()"),
+                "encode" if func.kind() == "attribute" => {
+                    reversal_form(func.child_by_field_name("object")?, bytes)
+                }
+                _ => None,
+            }
+        }
+        "parenthesized_expression" => reversal_form(node.named_child(0)?, bytes),
+        _ => None,
+    }
 }
 
 // Subscript-form reach-by-name detection is handled in a separate visitor
@@ -1161,8 +1279,11 @@ fn collect_decoder_imports_and_exec<'a>(
             "import_statement" | "import_from_statement" => {
                 collect_imported_decoders(node, bytes, &mut imports);
             }
-            "call" if exec_call.is_none() && call_is_exec_sink(node, bytes) => {
-                exec_call = Some(node);
+            "call" => {
+                collect_dunder_imported_decoder(node, bytes, &mut imports);
+                if exec_call.is_none() && call_is_exec_sink(node, bytes) {
+                    exec_call = Some(node);
+                }
             }
             _ => {}
         }
@@ -1236,6 +1357,14 @@ fn collect_imported_decoders(stmt: Node, bytes: &[u8], out: &mut Vec<&'static st
     }
 }
 
+/// `__import__("zlib")` with a literal name imports a decoder just as surely
+/// as `import zlib` does, while hiding it from a scan of import statements.
+fn collect_dunder_imported_decoder(call: Node, bytes: &[u8], out: &mut Vec<&'static str>) {
+    if let Some(name) = dynamic_import_module_name(call, bytes) {
+        push_decoder_unique(name, out);
+    }
+}
+
 fn first_dotted_name_root<'a>(node: Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
     if node.kind() == "identifier" {
         return std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).ok();
@@ -1270,6 +1399,20 @@ fn push_decoder_unique(name: &str, out: &mut Vec<&'static str>) {
 
 const DECOMPRESS_METHODS: &[&str] = &["decompress", "decompressobj", "decodestring", "decodebytes"];
 
+fn call_is_decompress(call: Node, bytes: &[u8]) -> bool {
+    let Some(func) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if func.kind() != "attribute" {
+        return false;
+    }
+    let Some(attr) = func.child_by_field_name("attribute") else {
+        return false;
+    };
+    let name = &bytes[attr.start_byte()..attr.end_byte()];
+    DECOMPRESS_METHODS.iter().any(|m| name == m.as_bytes())
+}
+
 fn check_decoder_decompress_payload(
     root: Node,
     bytes: &[u8],
@@ -1285,16 +1428,10 @@ fn check_decoder_decompress_payload(
             "import_statement" | "import_from_statement" => {
                 collect_imported_decoders(node, bytes, &mut imports);
             }
-            "call" if decompress_call.is_none() => {
-                if let Some(func) = node.child_by_field_name("function") {
-                    if func.kind() == "attribute" {
-                        if let Some(attr) = func.child_by_field_name("attribute") {
-                            let name = &bytes[attr.start_byte()..attr.end_byte()];
-                            if DECOMPRESS_METHODS.iter().any(|m| name == m.as_bytes()) {
-                                decompress_call = Some(node);
-                            }
-                        }
-                    }
+            "call" => {
+                collect_dunder_imported_decoder(node, bytes, &mut imports);
+                if decompress_call.is_none() && call_is_decompress(node, bytes) {
+                    decompress_call = Some(node);
                 }
             }
             _ => {}
@@ -1749,6 +1886,28 @@ mod tests {
     }
 
     #[test]
+    fn dunder_import_of_decoder_counts() {
+        let src = b"exec(__import__('zlib').decompress(blob))\n";
+        let findings = run(src);
+        let dec = findings
+            .iter()
+            .find(|f| f.kind == SignalKind::DecoderImportWithExec)
+            .expect("expected DecoderImportWithExec for __import__('zlib')");
+        assert!(dec.message.contains("zlib"));
+        assert!(findings
+            .iter()
+            .any(|f| f.kind == SignalKind::DecoderDecompressPayload));
+    }
+
+    #[test]
+    fn dunder_import_of_non_decoder_does_not_count() {
+        let src = b"exec(__import__('os').getcwd())\n";
+        assert!(run(src)
+            .iter()
+            .all(|f| f.kind != SignalKind::DecoderImportWithExec));
+    }
+
+    #[test]
     fn from_decoder_import_counts() {
         // `from base64 import b64decode` should count as a base64 import.
         let src = b"from base64 import b64decode\nexec(b64decode(p))\n";
@@ -1874,6 +2033,77 @@ mod tests {
             .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("marshal"))
             .expect("expected DynamicExecution finding for marshal.loads");
         assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn marshal_loads_via_dunder_import_warns() {
+        let src = b"code_obj = __import__('marshal').loads(blob)\n";
+        let hit = run(src)
+            .into_iter()
+            .find(|f| f.kind == SignalKind::DynamicExecution && f.message.contains("marshal"))
+            .expect("expected DynamicExecution finding for __import__('marshal').loads");
+        assert_eq!(hit.severity, Severity::Warn);
+    }
+
+    // -----------------------------------------------------------------------
+    // reversed-decode-input
+    // -----------------------------------------------------------------------
+
+    fn reversed_decode_hits(src: &[u8]) -> Vec<Finding> {
+        run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::ReversedDecodeInput)
+            .collect()
+    }
+
+    #[test]
+    fn b64decode_of_slice_reversed_warns() {
+        let hits = reversed_decode_hits(b"import base64\nx = base64.b64decode(blob[::-1])\n");
+        assert_eq!(hits.len(), 1, "{:?}", hits);
+        assert_eq!(hits[0].severity, Severity::Warn);
+        assert!(hits[0].message.contains("b64decode"));
+        assert!(hits[0].message.contains("[::-1]"));
+    }
+
+    #[test]
+    fn reversal_forms_are_recognized() {
+        for src in [
+            &b"base64.b64decode(''.join(reversed(blob)))\n"[..],
+            b"base64.b64decode(bytes(reversed(blob)))\n",
+            b"base64.b64decode(blob[ : : -1 ].encode())\n",
+            b"binascii.unhexlify(blob[::-1])\n",
+            b"bytes.fromhex(blob[::-1])\n",
+            b"zlib.decompress(blob[::-1])\n",
+            b"codecs.decode(blob[::-1], 'rot13')\n",
+            b"__import__('base64').b64decode(blob[::-1])\n",
+            b"marshal.loads(blob[::-1])\n",
+        ] {
+            assert_eq!(
+                reversed_decode_hits(src).len(),
+                1,
+                "expected one hit for {}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
+
+    #[test]
+    fn non_reversing_slices_and_non_decoders_are_ignored() {
+        for src in [
+            &b"base64.b64decode(blob[1:])\n"[..],
+            b"base64.b64decode(blob[::2])\n",
+            b"base64.b64decode(blob)\n",
+            b"print(blob[::-1])\n",
+            b"text = blob[::-1].decode()\n",
+            b"base64.b64decode(blob)[::-1]\n",
+            b"json.loads(blob[::-1])\n",
+        ] {
+            assert!(
+                reversed_decode_hits(src).is_empty(),
+                "unexpected hit for {}",
+                String::from_utf8_lossy(src)
+            );
+        }
     }
 
     #[test]

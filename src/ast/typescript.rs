@@ -180,6 +180,8 @@ fn check_call(
 
     let positional: Vec<Node> = positional_args(args);
 
+    check_reversed_decode_input(node, func, &positional, bytes, path, index, findings);
+
     // Dynamic `import(x)` — the callee is an `import` keyword node.
     if func.kind() == "import" {
         if let Some(first) = positional.first() {
@@ -350,6 +352,130 @@ fn check_call(
 }
 
 // ---------------------------------------------------------------------------
+// Reversed-decode-input — `atob(s.split("").reverse().join(""))`
+// ---------------------------------------------------------------------------
+//
+// Storing an encoded payload backwards defeats signature matching and the
+// recognizable prefixes of encoded data (`eJ` for base64-of-zlib, `H4sI` for
+// base64-of-gzip). Reversing data immediately before decoding it has no
+// ordinary use.
+
+/// `Buffer.from(x, enc)` only decodes when `enc` names a binary-to-text
+/// encoding; the default (`utf8`) just copies the string.
+const BUFFER_DECODE_ENCODINGS: &[&str] = &["base64", "base64url", "hex"];
+
+/// Node zlib entry points that take compressed bytes.
+const ZLIB_DECOMPRESSORS: &[&str] = &[
+    "inflateSync",
+    "inflateRawSync",
+    "gunzipSync",
+    "unzipSync",
+    "brotliDecompressSync",
+    "inflate",
+    "inflateRaw",
+    "gunzip",
+    "unzip",
+    "brotliDecompress",
+];
+
+fn check_reversed_decode_input(
+    anchor: Node,
+    callee: Node,
+    positional: &[Node],
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(first) = positional.first() else {
+        return;
+    };
+    let Some(decoder) = decoder_name(callee, positional, bytes) else {
+        return;
+    };
+    let Some(form) = reversal_form(*first, bytes) else {
+        return;
+    };
+    push(
+        findings,
+        anchor,
+        bytes,
+        path,
+        index,
+        SignalKind::ReversedDecodeInput,
+        Severity::Warn,
+        0.85,
+        format!(
+            "`{}` decodes input reversed with `{}` — payload stored backwards to evade signature matching",
+            decoder, form
+        ),
+    );
+}
+
+/// If `callee` (with its `positional` args) is a decoder, returns a label
+/// for it: `atob`, `decodeURIComponent`, `Buffer.from(…, "base64")`, or a
+/// zlib decompressor.
+fn decoder_name(callee: Node, positional: &[Node], bytes: &[u8]) -> Option<String> {
+    let name = match callee.kind() {
+        "identifier" => node_text(callee, bytes),
+        "member_expression" => node_text(callee.child_by_field_name("property")?, bytes),
+        _ => return None,
+    };
+    match name {
+        "atob" | "decodeURIComponent" | "decodeURI" | "unescape" => Some(name.to_string()),
+        n if ZLIB_DECOMPRESSORS.contains(&n) && callee.kind() == "member_expression" => {
+            Some(n.to_string())
+        }
+        "from" | "Buffer" => {
+            // `Buffer.from(x, enc)` / `new Buffer(x, enc)`.
+            if name == "from"
+                && member_qualified_name(callee, bytes)
+                    .is_none_or(|q| q != "Buffer.from" && !q.ends_with(".Buffer.from"))
+            {
+                return None;
+            }
+            let enc = positional.get(1).filter(|n| is_string_literal(**n))?;
+            let enc = node_text(*enc, bytes).trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+            BUFFER_DECODE_ENCODINGS
+                .contains(&enc)
+                .then(|| format!("Buffer.from(…, \"{}\")", enc))
+        }
+        _ => None,
+    }
+}
+
+/// If `node` reverses a string, array, or buffer, returns a short label for
+/// the idiom used: `x.split("").reverse().join("")`, `[...x].reverse().join("")`,
+/// `x.toReversed().join("")`, or a bare `buf.reverse()`. Looks through
+/// parentheses and TypeScript `as` / `!` wrappers.
+fn reversal_form(node: Node, bytes: &[u8]) -> Option<&'static str> {
+    match node.kind() {
+        "parenthesized_expression"
+        | "as_expression"
+        | "non_null_expression"
+        | "satisfies_expression" => reversal_form(node.named_child(0)?, bytes),
+        "call_expression" => {
+            let func = call_function(node)?;
+            if func.kind() != "member_expression" {
+                return None;
+            }
+            let method = node_text(func.child_by_field_name("property")?, bytes);
+            match method {
+                "reverse" => Some(".reverse()"),
+                "toReversed" => Some(".toReversed()"),
+                "join" => match reversal_form(func.child_by_field_name("object")?, bytes)? {
+                    ".reverse()" => Some(".reverse().join()"),
+                    ".toReversed()" => Some(".toReversed().join()"),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // new_expression — `new Function(x)` is the constructor form of Function().
 // ---------------------------------------------------------------------------
 
@@ -371,6 +497,10 @@ fn check_new(
         return;
     };
     let positional = positional_args(args);
+    // Deprecated `new Buffer(x, "base64")` decodes the same as `Buffer.from`.
+    if name == "Buffer" {
+        check_reversed_decode_input(node, ctor, &positional, bytes, path, index, findings);
+    }
     match name {
         "Function" => {
             if let Some(first) = positional.into_iter().next() {
@@ -1180,6 +1310,67 @@ mod tests {
         // flags on the literal itself.
         let f = run(b"const g = new Function(\"return 1\");");
         assert!(f.iter().all(|x| x.kind != SignalKind::DynamicExecution));
+    }
+
+    // -----------------------------------------------------------------------
+    // reversed-decode-input
+    // -----------------------------------------------------------------------
+
+    fn reversed_decode_hits(src: &[u8]) -> Vec<Finding> {
+        run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::ReversedDecodeInput)
+            .collect()
+    }
+
+    #[test]
+    fn atob_of_split_reverse_join_warns() {
+        let hits = reversed_decode_hits(b"const s = atob(p.split('').reverse().join(''));");
+        assert_eq!(hits.len(), 1, "{:?}", hits);
+        assert_eq!(hits[0].severity, Severity::Warn);
+        assert!(hits[0].message.contains("atob"));
+        assert!(hits[0].message.contains(".reverse().join()"));
+    }
+
+    #[test]
+    fn js_reversal_forms_are_recognized() {
+        for src in [
+            &b"atob([...p].reverse().join(''));"[..],
+            b"atob(Array.from(p).reverse().join(''));",
+            b"window.atob(p.split('').toReversed().join(''));",
+            b"atob((p as string).split('').reverse().join(''));",
+            b"Buffer.from(p.split('').reverse().join(''), 'base64');",
+            b"Buffer.from(p.split('').reverse().join(''), \"hex\");",
+            b"new Buffer(p.split('').reverse().join(''), 'base64');",
+            b"zlib.inflateSync(buf.reverse());",
+            b"decodeURIComponent(p.split('').reverse().join(''));",
+        ] {
+            assert_eq!(
+                reversed_decode_hits(src).len(),
+                1,
+                "expected one hit for {}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
+
+    #[test]
+    fn js_non_reversing_or_non_decoding_is_ignored() {
+        for src in [
+            &b"atob(p);"[..],
+            b"atob(p.split('').join(''));",
+            b"console.log(p.split('').reverse().join(''));",
+            b"Buffer.from(p.split('').reverse().join(''));",
+            b"Buffer.from(p.split('').reverse().join(''), 'utf8');",
+            b"atob(p).split('').reverse().join('');",
+            b"items.reverse();",
+        ] {
+            assert!(
+                reversed_decode_hits(src).is_empty(),
+                "unexpected hit for {}",
+                String::from_utf8_lossy(src)
+            );
+        }
     }
 
     #[test]
