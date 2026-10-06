@@ -13,10 +13,16 @@ To install the CLI via Python `pip`:
 pip install disclude
 ```
 
-To instsall the CLI via Rust `cargo`:
+To install the CLI via Rust `cargo`:
 
 ```
 cargo install disclude
+```
+
+To use disclude as a Rust library (see [Library usage](#library-usage)):
+
+```
+cargo add disclude
 ```
 
 
@@ -24,7 +30,7 @@ cargo install disclude
 
 **`human`**: coloured terminal output grouped by file.
 
-**`json`**: newline-delimited JSON, one object per file. Suitable for further processing.
+**`json`**: a single JSON document with scan totals (`files_scanned`, `files_skipped`, `findings_total`, `findings_by_severity`), `truncated`, `diagnostics` (coverage gaps such as unreadable files or a skipped `--diff`), and per-file findings. Suitable for further processing.
 
 **`sarif`**: [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), compatible with GitHub Code Scanning, VS Code SARIF viewer, and most CI platforms. Every signal kind appears in the rules catalog even if no findings were produced.
 
@@ -330,6 +336,16 @@ AST pass; language-specific.
 
 ## What is New
 
+
+### 3.0.0
+
+The library API can now be embedded in long-running hosts (see [Library usage](#library-usage)):
+
+- `ScanOptions::cancel` stops a scan between files; the result is marked `truncated`.
+- `scan()` no longer writes to stderr. Coverage gaps are returned in `ScanResult::diagnostics`, and benign skips (binary, oversized, unrecognized language) are counted in `files_skipped`. The CLI still prints diagnostics to stderr, as `disclude: [<kind>] <path>: <detail>`.
+- New `disclude::VERSION` constant.
+- `SignalKind`, `Language`, and the public result and option structs are `#[non_exhaustive]`. Breaking: build `ScanOptions` from `Default`, and add a `_ =>` arm when matching these enums. `ignore::walk` now returns `(paths, diagnostics)`.
+- JSON output adds `files_skipped`, `truncated`, and `diagnostics`.
 
 ### 2.0.0
 
