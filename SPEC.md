@@ -1,6 +1,6 @@
 # Spec: disclude-rs embedding-ready public API
 
-Status: draft · Target crate: `disclude` (currently `2.0.0`) · Consumer: `disclude-daemon` in `disclude-platform` (the `disclude-www` web server does not link disclude)
+Status: draft · Target crate: `disclude` (currently `3.0.0`) · Consumer: `disclude-daemon` in `disclude-platform` (the `disclude-www` web server does not link disclude)
 
 ## 1. Summary
 
