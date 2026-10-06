@@ -115,6 +115,30 @@ Each finding receives a verdict on a 0–4 axis:
 **`sarif`**: `llm_score`, `llm_verdict`, and `llm_summary` are added to each result's `properties`.
 
 
+## Library usage
+
+disclude is also a library. `disclude::scan()` is offline and pure: it reads files and, only when `diff_ref` is set, shells out to `git`. The LLM pass is orchestrated by the CLI, not by `scan()`.
+
+```rust
+use std::sync::{atomic::AtomicBool, Arc};
+
+let cancel = Arc::new(AtomicBool::new(false));
+let mut opts = disclude::ScanOptions::default();
+opts.cancel = Some(cancel.clone()); // set to true from another thread to stop early
+
+let result = disclude::scan(std::path::Path::new("./pkg"), &opts)?;
+println!("disclude {}", disclude::VERSION);
+for d in &result.diagnostics {
+    eprintln!("{} {:?}: {}", d.kind.as_str(), d.path, d.detail);
+}
+```
+
+- **No stderr from the library.** Coverage gaps (unreadable files, walk errors, an unloadable ignore file, failed diff annotation) are returned in `ScanResult::diagnostics`. Files dropped for benign reasons (binary, over 10 MiB, unrecognized language) are counted in `files_skipped`.
+- **Cancellation** is checked between files. When it triggers, the result has `truncated: true` and covers only the files analysed so far. A single file's analysis can't be interrupted, so hard deadlines belong to the host process.
+- **`VERSION`**: record it with stored results. A missing finding means "not flagged by this version's signals", not "clean".
+- **Snippets are raw.** `Finding::snippet` can contain the adversarial bytes that triggered the finding (bidi controls, invisible tags). Redaction happens in the reporters, not in `scan()`. Defuse snippets before storing or displaying them.
+- **`diff_ref`** needs `git` on `PATH` and a checkout whose history contains both the ref and `HEAD`. A `--depth 1` clone won't resolve an older tag.
+- `SignalKind`, `Language`, `DiagnosticKind`, and the result structs are `#[non_exhaustive]`, so matches need a `_ =>` arm. Build `ScanOptions` from `Default`.
 
 ## Languages
 

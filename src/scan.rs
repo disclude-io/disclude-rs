@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -10,7 +12,7 @@ use crate::ast;
 use crate::ast::FileFlags;
 use crate::diff;
 use crate::embedded;
-use crate::finding::{FileAnalysis, ScanResult, Severity};
+use crate::finding::{DiagnosticKind, FileAnalysis, ScanDiagnostic, ScanResult, Severity};
 use crate::ignore::walk;
 use crate::language::Language;
 use crate::package_json;
@@ -26,14 +28,46 @@ const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// Null-byte probe size for binary detection.
 const BINARY_PROBE_BYTES: usize = 8192;
 
+/// Options for [`scan`]. Construct with `ScanOptions::default()` and set
+/// fields as needed.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ScanOptions {
     pub lang_override: Option<Language>,
     pub run_raw: bool,
     pub run_token: bool,
     pub run_ast: bool,
     pub ignore_path: Option<PathBuf>,
+    /// Annotate findings on lines added since this git ref.
+    ///
+    /// Shells out to `git -C <root> diff <ref> HEAD`, so it requires a `git`
+    /// binary on `PATH` and a scan root that is a real checkout whose history
+    /// contains both `<ref>` and `HEAD` (a `--depth 1` clone will not resolve
+    /// an older ref). On failure the scan still succeeds and a
+    /// [`DiagnosticKind::DiffSkipped`] diagnostic is recorded.
     pub diff_ref: Option<String>,
+    /// Cooperative cancellation. Checked before each file is analysed; once
+    /// true, remaining files are not analysed and the result is returned with
+    /// `truncated` set. This is between-files only: a single file's analysis
+    /// is not interruptible (its cost is bounded by the file-size ceiling), so
+    /// hard deadlines belong to the host's process boundary.
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl ScanOptions {
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+}
+
+/// Per-file result of the parallel analysis stage.
+enum FileOutcome {
+    Analyzed(FileAnalysis),
+    Skipped,
+    Failed(ScanDiagnostic),
+    Cancelled,
 }
 
 impl Default for ScanOptions {
@@ -45,27 +79,46 @@ impl Default for ScanOptions {
             run_ast: true,
             ignore_path: None,
             diff_ref: None,
+            cancel: None,
         }
     }
 }
 
 pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
-    let files = walk(root, opts.ignore_path.as_deref());
+    let (files, mut diagnostics) = walk(root, opts.ignore_path.as_deref());
 
-    let mut analyses: Vec<FileAnalysis> = files
+    let outcomes: Vec<FileOutcome> = files
         .par_iter()
-        .filter_map(|path| match analyze_file(path, opts) {
-            Ok(Some(fa)) => Some(fa),
-            Ok(None) => None,
-            Err(err) => {
-                eprintln!("disclude: {}: {}", path.display(), err);
-                None
+        .map(|path| {
+            if opts.is_cancelled() {
+                return FileOutcome::Cancelled;
+            }
+            match analyze_file(path, opts) {
+                Ok(Some(fa)) => FileOutcome::Analyzed(fa),
+                Ok(None) => FileOutcome::Skipped,
+                Err(err) => FileOutcome::Failed(ScanDiagnostic::new(
+                    Some(path.clone()),
+                    DiagnosticKind::ReadError,
+                    format!("{:#}", err),
+                )),
             }
         })
         .collect();
+
+    let mut analyses: Vec<FileAnalysis> = Vec::new();
+    let mut files_skipped = 0usize;
+    let mut truncated = false;
+    for outcome in outcomes {
+        match outcome {
+            FileOutcome::Analyzed(fa) => analyses.push(fa),
+            FileOutcome::Skipped => files_skipped += 1,
+            FileOutcome::Failed(d) => diagnostics.push(d),
+            FileOutcome::Cancelled => truncated = true,
+        }
+    }
     analyses.sort_by(|a, b| a.path.cmp(&b.path));
 
-    if let Some(git_ref) = opts.diff_ref.as_deref() {
+    if let Some(git_ref) = opts.diff_ref.as_deref().filter(|_| !truncated) {
         match diff::compute_added_lines(root, git_ref) {
             Ok(added) => {
                 for fa in analyses.iter_mut() {
@@ -79,13 +132,15 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "disclude: --diff annotation skipped: {:#}; continuing without diff info",
-                    e
-                );
+                diagnostics.push(ScanDiagnostic::new(
+                    None,
+                    DiagnosticKind::DiffSkipped,
+                    format!("{:#}; continuing without diff info", e),
+                ));
             }
         }
     }
+    diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut findings_by_severity: HashMap<Severity, usize> = HashMap::new();
     let mut findings_total = 0usize;
@@ -103,11 +158,14 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
     Ok(ScanResult {
         root: root.to_path_buf(),
         files_scanned: analyses.len(),
+        files_skipped,
         files_with_findings,
         findings_total,
         findings_by_severity,
         files: analyses,
         diff_ref: opts.diff_ref.clone(),
+        diagnostics,
+        truncated,
     })
 }
 

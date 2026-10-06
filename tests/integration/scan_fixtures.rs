@@ -2151,3 +2151,135 @@ fn markdown_unfenced_command_flagged_via_prose_scan() {
         hit.message
     );
 }
+
+// --- Embedding API ------------------------------------------------------
+
+#[test]
+fn version_const_matches_cargo() {
+    assert_eq!(disclude::VERSION, env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn cancel_before_start_returns_truncated() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let mut opts = ScanOptions::default();
+    opts.cancel = Some(Arc::new(AtomicBool::new(true)));
+    let r = scan(&fixture_root(), &opts).expect("scan failed");
+    assert!(r.truncated);
+    assert!(r.files.is_empty());
+    assert_eq!(r.files_scanned, 0);
+}
+
+#[test]
+fn uncancelled_scan_is_not_truncated() {
+    assert!(!run().truncated);
+}
+
+#[test]
+fn bad_diff_ref_emits_diff_skipped_diagnostic() {
+    let mut opts = ScanOptions::default();
+    opts.diff_ref = Some("no-such-ref-xyz".into());
+    let r = scan(&fixture_root(), &opts).expect("scan should not fail on bad diff ref");
+    assert!(r
+        .diagnostics
+        .iter()
+        .any(|d| d.kind == disclude::DiagnosticKind::DiffSkipped));
+}
+
+#[test]
+fn missing_ignore_file_emits_diagnostic() {
+    let missing = fixture_root().join("no-such-ignore-file");
+    let mut opts = ScanOptions::default();
+    opts.ignore_path = Some(missing.clone());
+    let r = scan(&fixture_root(), &opts).expect("scan failed");
+    assert!(r.diagnostics.iter().any(|d| {
+        d.kind == disclude::DiagnosticKind::IgnoreFileError && d.path.as_deref() == Some(&*missing)
+    }));
+}
+
+#[test]
+fn fixture_scan_has_no_diagnostics() {
+    let r = run();
+    assert!(r.diagnostics.is_empty(), "unexpected: {:?}", r.diagnostics);
+    assert!(r.files_scanned > 0);
+}
+
+#[test]
+fn binary_files_are_counted_as_skipped() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skip_count");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("ok.py"), "print('hi')\n").unwrap();
+    std::fs::write(dir.join("blob.py"), b"\x00\x01\x02binary").unwrap();
+
+    let r = scan(&dir, &ScanOptions::default()).expect("scan failed");
+    assert_eq!(r.files_scanned, 1);
+    assert_eq!(r.files_skipped, 1);
+    assert!(r.diagnostics.is_empty());
+}
+
+fn object_keys(v: &serde_json::Value) -> Vec<String> {
+    let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn scan_result_serde_round_trip_and_schema() {
+    let r = run();
+    let first = serde_json::to_value(&r).expect("serialize");
+    let back: disclude::ScanResult = serde_json::from_value(first.clone()).expect("deserialize");
+    let second = serde_json::to_value(&back).expect("re-serialize");
+    assert_eq!(first, second);
+
+    assert_eq!(
+        object_keys(&first),
+        [
+            "diagnostics",
+            "diff_ref",
+            "files",
+            "files_scanned",
+            "files_skipped",
+            "files_with_findings",
+            "findings_by_severity",
+            "findings_total",
+            "root",
+            "truncated",
+        ]
+    );
+    let file = first["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| !f["findings"].as_array().unwrap().is_empty())
+        .expect("a file with findings");
+    assert_eq!(
+        object_keys(file),
+        [
+            "file_complexity_max",
+            "file_complexity_mean",
+            "findings",
+            "language",
+            "parse_error",
+            "path",
+        ]
+    );
+    assert_eq!(
+        object_keys(&file["findings"][0]),
+        [
+            "byte_offset",
+            "col",
+            "confidence",
+            "diff_introduced",
+            "kind",
+            "line",
+            "message",
+            "pass",
+            "path",
+            "severity",
+            "snippet",
+        ]
+    );
+}

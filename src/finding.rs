@@ -12,8 +12,11 @@ pub enum PassKind {
     Ast,
 }
 
+/// Open set: new signals are added over time, so downstream matches need a
+/// `_ =>` arm.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum SignalKind {
     // raw
     UnicodeBidi,
@@ -163,6 +166,7 @@ impl Severity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Finding {
     pub path: PathBuf,
     pub byte_offset: usize,
@@ -173,11 +177,16 @@ pub struct Finding {
     pub severity: Severity,
     pub confidence: f32,
     pub message: String,
+    /// Raw, unredacted source context. May contain the very adversarial bytes
+    /// that triggered the finding (bidi controls, invisible tags, high-entropy
+    /// blobs). [`redact_snippet`] is applied by the reporters, not by `scan()`;
+    /// embedders must defuse snippets before storage or display.
     pub snippet: String,
     pub diff_introduced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FileAnalysis {
     pub path: PathBuf,
     pub language: Language,
@@ -187,15 +196,65 @@ pub struct FileAnalysis {
     pub parse_error: Option<String>,
 }
 
+/// A coverage gap or non-fatal problem encountered during a scan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum DiagnosticKind {
+    /// A candidate file could not be stat'ed or read; it was not analysed.
+    ReadError,
+    /// The directory walk reported an error (unreadable directory, etc.).
+    WalkError,
+    /// The extra ignore file (`ScanOptions::ignore_path`) could not be loaded.
+    IgnoreFileError,
+    /// `ScanOptions::diff_ref` was set but diff annotation failed.
+    DiffSkipped,
+}
+
+impl DiagnosticKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DiagnosticKind::ReadError => "read-error",
+            DiagnosticKind::WalkError => "walk-error",
+            DiagnosticKind::IgnoreFileError => "ignore-file-error",
+            DiagnosticKind::DiffSkipped => "diff-skipped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ScanDiagnostic {
+    pub path: Option<PathBuf>,
+    pub kind: DiagnosticKind,
+    pub detail: String,
+}
+
+impl ScanDiagnostic {
+    pub fn new(path: Option<PathBuf>, kind: DiagnosticKind, detail: impl Into<String>) -> Self {
+        Self {
+            path,
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScanResult {
     pub root: PathBuf,
     pub files_scanned: usize,
+    /// Files dropped for benign reasons: binary, oversized, or undetected language.
+    pub files_skipped: usize,
     pub files_with_findings: usize,
     pub findings_total: usize,
     pub findings_by_severity: HashMap<Severity, usize>,
     pub files: Vec<FileAnalysis>,
     pub diff_ref: Option<String>,
+    pub diagnostics: Vec<ScanDiagnostic>,
+    /// True when the scan was cancelled before every file was analysed.
+    pub truncated: bool,
 }
 
 /// Truncate a snippet to a reasonable context length for reporting.

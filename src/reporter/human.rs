@@ -76,6 +76,16 @@ pub fn render(
         "{} findings ({} critical, {} warn, {} info) in {} files",
         total, critical, warn, info, result.files_scanned
     )?;
+    if result.files_skipped > 0 {
+        writeln!(
+            writer,
+            "{} files skipped (binary, oversized, or unrecognized language)",
+            result.files_skipped
+        )?;
+    }
+    if result.truncated {
+        writeln!(writer, "scan truncated (cancelled): results are partial")?;
+    }
     if let Some(dref) = &result.diff_ref {
         writeln!(writer, "diff base: {}", dref)?;
     }

@@ -16,7 +16,7 @@ use crate::llm::{finding_key, LLMReview};
 const SARIF_VERSION: &str = "2.1.0";
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 const TOOL_NAME: &str = "disclude";
-const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TOOL_VERSION: &str = crate::VERSION;
 const TOOL_URI: &str = "https://github.com/disclude-io/disclude-rs";
 
 pub fn empty_document() -> serde_json::Value {
@@ -469,6 +469,7 @@ mod tests {
         ScanResult {
             root: PathBuf::from("/tmp/root"),
             files_scanned: 1,
+            files_skipped: 0,
             files_with_findings: 1,
             findings_total: 1,
             findings_by_severity: HashMap::new(),
@@ -481,6 +482,8 @@ mod tests {
                 parse_error: None,
             }],
             diff_ref: None,
+            diagnostics: Vec::new(),
+            truncated: false,
         }
     }
 

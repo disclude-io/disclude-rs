@@ -19,9 +19,17 @@ pub mod scorer;
 pub mod token;
 pub mod util;
 
-pub use finding::{FileAnalysis, Finding, PassKind, ScanResult, Severity, SignalKind};
+pub use finding::{
+    DiagnosticKind, FileAnalysis, Finding, PassKind, ScanDiagnostic, ScanResult, Severity,
+    SignalKind,
+};
 pub use language::Language;
 pub use scan::{scan, ScanOptions};
+
+/// The disclude crate version. Embedders should record it alongside stored
+/// results: the absence of a finding means "not flagged by this version's
+/// signal set", not "clean".
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use clap::{Parser, Subcommand};
 use reporter::OutputFormat;
@@ -160,9 +168,21 @@ fn run_scan_cli(args: ScanArgs) -> anyhow::Result<u8> {
         run_ast: !args.no_ast,
         ignore_path: args.ignore,
         diff_ref: args.diff,
+        cancel: None,
     };
 
     let mut result = scan::scan(&args.path, &opts)?;
+    for d in &result.diagnostics {
+        match &d.path {
+            Some(p) => eprintln!(
+                "disclude: [{}] {}: {}",
+                d.kind.as_str(),
+                p.display(),
+                d.detail
+            ),
+            None => eprintln!("disclude: [{}] {}", d.kind.as_str(), d.detail),
+        }
+    }
 
     let llm_review: Option<llm::LLMReview> = if args.llm {
         match llm::detect_provider(

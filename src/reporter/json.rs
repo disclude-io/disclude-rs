@@ -95,10 +95,13 @@ fn render_enriched(
     let doc: Value = serde_json::json!({
         "root": result.root,
         "files_scanned": result.files_scanned,
+        "files_skipped": result.files_skipped,
         "files_with_findings": files_with_findings,
         "findings_total": findings_total,
         "findings_by_severity": result.findings_by_severity,
         "diff_ref": result.diff_ref,
+        "truncated": result.truncated,
+        "diagnostics": result.diagnostics,
         "files": files,
     });
 
@@ -128,6 +131,7 @@ fn filter_result(result: &ScanResult, threshold: Severity) -> ScanResult {
     ScanResult {
         root: result.root.clone(),
         files_scanned: result.files_scanned,
+        files_skipped: result.files_skipped,
         files_with_findings: filtered_files
             .iter()
             .filter(|fa| !fa.findings.is_empty())
@@ -136,5 +140,7 @@ fn filter_result(result: &ScanResult, threshold: Severity) -> ScanResult {
         findings_by_severity: result.findings_by_severity.clone(),
         files: filtered_files,
         diff_ref: result.diff_ref.clone(),
+        diagnostics: result.diagnostics.clone(),
+        truncated: result.truncated,
     }
 }
