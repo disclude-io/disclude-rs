@@ -336,6 +336,10 @@ AST pass; language-specific.
 
 ## What is New
 
+### 3.2.0
+
+Improvements to heuristic signal detections.
+
 ### 3.1.0
 
 Improved LLM handling to support Haiku 5.5.
