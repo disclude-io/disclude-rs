@@ -80,7 +80,7 @@ disclude scan ./my-package --diff main --exit-code
 disclude scan ./my-package --llm
 
 # LLM scan with a specific provider and model
-disclude scan ./my-package --llm --llm-provider anthropic --llm-model claude-opus-4-7
+disclude scan ./my-package --llm --llm-provider anthropic --llm-model claude-sonnet-5-5
 ```
 
 
@@ -94,7 +94,7 @@ The provider is auto-detected from environment variables in priority order:
 
 | Provider | Key env var | Default model |
 |---|---|---|
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` |
 | OpenAI | `OPENAI_API_KEY` | `gpt-4o-mini` |
 | Ollama cloud | `OLLAMA_API_KEY` | `llama3.2` |
 
@@ -336,6 +336,9 @@ AST pass; language-specific.
 
 ## What is New
 
+### 3.1.0
+
+Improved LLM handling to support Haiku 5.5.
 
 ### 3.0.0
 

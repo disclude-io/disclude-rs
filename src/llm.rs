@@ -9,6 +9,11 @@ use crate::language::Language;
 
 const BATCH_PAYLOAD_LIMIT: usize = 6 * 1024;
 
+/// `max_tokens` for Anthropic requests. Current models think by default
+/// (Claude Haiku 5.5 at `medium` effort), and thinking counts against this
+/// limit, so it leaves room for both the thinking and the JSON verdicts.
+const ANTHROPIC_MAX_TOKENS: u32 = 16_000;
+
 pub type FindingKey = (PathBuf, usize, usize, SignalKind);
 pub type LLMReview = HashMap<FindingKey, LLMVerdict>;
 
@@ -55,7 +60,7 @@ impl LLMProvider {
     fn defaults(&self) -> (&'static str, &'static str, &'static str) {
         match self {
             LLMProvider::Anthropic => (
-                "claude-haiku-4-5",
+                "claude-haiku-5-5",
                 "https://api.anthropic.com",
                 "ANTHROPIC_API_KEY",
             ),
@@ -273,7 +278,7 @@ pub fn call_anthropic(system: &str, user: &str, config: &LLMConfig) -> anyhow::R
     let url = format!("{}/v1/messages", config.base_url);
     let body = json!({
         "model": config.model,
-        "max_tokens": 8192,
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
         "system": system,
         "messages": [{"role": "user", "content": user}]
     });
@@ -292,10 +297,29 @@ pub fn call_anthropic(system: &str, user: &str, config: &LLMConfig) -> anyhow::R
 
     let parsed: Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("failed to parse Anthropic response JSON: {}", e))?;
-    Ok(parsed["content"][0]["text"]
-        .as_str()
-        .unwrap_or("")
-        .to_string())
+    anthropic_response_text(&parsed)
+}
+
+/// The answer in a Messages API response: every `text` block, joined in
+/// order. Models that think put `thinking` blocks before the answer, so the
+/// first content block is not necessarily text. A response with no text, or
+/// one cut off at `max_tokens`, is an error rather than an empty answer.
+pub fn anthropic_response_text(parsed: &Value) -> anyhow::Result<String> {
+    let stop_reason = parsed["stop_reason"].as_str().unwrap_or("unknown");
+    if stop_reason == "max_tokens" {
+        anyhow::bail!("Anthropic response was cut off at max_tokens ({ANTHROPIC_MAX_TOKENS})");
+    }
+    let text: String = parsed["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "text")
+        .filter_map(|block| block["text"].as_str())
+        .collect();
+    if text.trim().is_empty() {
+        anyhow::bail!("Anthropic response contained no text (stop_reason: {stop_reason})");
+    }
+    Ok(text)
 }
 
 pub fn call_openai_compat(system: &str, user: &str, config: &LLMConfig) -> anyhow::Result<String> {
@@ -392,5 +416,68 @@ fn parse_verdict(item: &Value) -> LLMVerdict {
         confidence,
         summary,
         reasoning,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_after_thinking_blocks_is_the_answer() {
+        let resp = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "sig"},
+                {"type": "text", "text": "{\"verdicts\": "},
+                {"type": "text", "text": "[]}"}
+            ]
+        });
+        assert_eq!(
+            anthropic_response_text(&resp).unwrap(),
+            "{\"verdicts\": []}"
+        );
+    }
+
+    #[test]
+    fn plain_text_responses_still_work() {
+        let resp = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "{\"verdicts\": []}"}]
+        });
+        assert_eq!(
+            anthropic_response_text(&resp).unwrap(),
+            "{\"verdicts\": []}"
+        );
+    }
+
+    #[test]
+    fn no_text_or_truncation_is_an_error() {
+        let thinking_only = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "thinking", "thinking": "", "signature": "sig"}]
+        });
+        assert!(anthropic_response_text(&thinking_only).is_err());
+        let refusal = json!({"stop_reason": "refusal", "content": []});
+        let err = anthropic_response_text(&refusal).unwrap_err().to_string();
+        assert!(err.contains("refusal"), "{err}");
+        let cut = json!({
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": "{\"verdicts\": [{"}]
+        });
+        assert!(anthropic_response_text(&cut).is_err());
+    }
+
+    #[test]
+    fn anthropic_defaults_to_haiku_5_5() {
+        let (model, url, key) = LLMProvider::Anthropic.defaults();
+        assert_eq!(
+            (model, url, key),
+            (
+                "claude-haiku-5-5",
+                "https://api.anthropic.com",
+                "ANTHROPIC_API_KEY"
+            )
+        );
     }
 }
