@@ -2019,6 +2019,35 @@ fn rst_code_block_emits_embedded_bash_finding() {
 }
 
 #[test]
+fn rst_shell_session_scans_the_commands_not_the_prompts() {
+    // `$ pytest --version` then its output: the `$` prompt is not a command
+    // name decided at runtime, but `$ curl … | bash` typed at a prompt (and
+    // continued with `>`) is still a pipe to a shell.
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("rst/shell_session.rst"))
+        .expect("shell_session.rst scanned");
+    assert!(
+        file.findings
+            .iter()
+            .all(|f| !f.message.contains("command name is a variable")),
+        "{:?}",
+        file.findings
+    );
+    assert!(
+        file.findings
+            .iter()
+            .any(|f| f.kind == SignalKind::DynamicExecution
+                && f.line == 15
+                && f.snippet.contains("$ curl")),
+        "{:?}",
+        file.findings
+    );
+}
+
+#[test]
 fn text_file_bidi_payload_is_scanned() {
     // Plain .txt gets the global raw payload pass: a bidi override is flagged.
     let r = run();

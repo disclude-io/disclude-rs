@@ -113,7 +113,7 @@ pub fn tokenize(bytes: &[u8]) -> Vec<Token> {
             });
             continue;
         }
-        // Character literals — emit as Other.
+        // Character literals.
         if b == b'\'' {
             let start = i;
             i += 1;
@@ -127,7 +127,7 @@ pub fn tokenize(bytes: &[u8]) -> Vec<Token> {
                 i += 1;
             }
             out.push(Token {
-                kind: TokenKind::Other,
+                kind: TokenKind::CharLiteral,
                 start,
                 end: i,
                 content_start: start,

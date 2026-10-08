@@ -46,6 +46,23 @@ fn compression_ratio(bytes: &[u8]) -> f32 {
     compress(bytes) as f32 / bytes.len() as f32
 }
 
+/// Share of adjacent character pairs that are neighbours (`A→B`, `z→y`) at or
+/// above which a span is an alphabet table, not data: `ABCD…xyz0123…+/`
+/// scores 0.94, and the mutated alphabets in a base64 library's tests
+/// (`AACDEF…`, `…YZZbc…`) stay above 0.8. Encoded random bytes score about
+/// 1/64. High enough that disguising a payload as an alphabet would take
+/// three times its length in ordered padding.
+const ALPHABET_MIN_SEQUENTIAL: f32 = 0.75;
+
+/// The share of adjacent byte pairs in `span` that differ by exactly one.
+fn sequential_share(span: &[u8]) -> f32 {
+    if span.len() < 2 {
+        return 0.0;
+    }
+    let seq = span.windows(2).filter(|w| w[0].abs_diff(w[1]) == 1).count();
+    seq as f32 / (span.len() - 1) as f32
+}
+
 const BASE64_LONG_SPAN: usize = 256;
 const BASE64_SHORT_MIN_RATIO: f32 = 0.85;
 const BASE64_LONG_MIN_RATIO: f32 = 0.70;
@@ -93,6 +110,11 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
         // large payloads go unseen. Short spans keep a stricter floor, since
         // zlib's fixed overhead inflates their ratio (random 64-char base64
         // sits near 1.1) and a lenient floor admits repetitive identifiers.
+        // An alphabet (base64's own, Base32's, a custom one), written out in
+        // order: incompressible to zlib at this length, but not data.
+        if sequential_share(span) >= ALPHABET_MIN_SEQUENTIAL {
+            continue;
+        }
         let ratio = compression_ratio(span);
         let min_ratio = if len >= BASE64_LONG_SPAN {
             BASE64_LONG_MIN_RATIO
@@ -320,6 +342,32 @@ mod tests {
     fn run(src: &[u8]) -> Vec<Finding> {
         let idx = LineIndex::new(src);
         analyze(&PathBuf::from("test.py"), src, &idx)
+    }
+
+    #[test]
+    fn alphabet_tables_are_not_base64_blobs() {
+        let blobs = |src: &str| {
+            let idx = LineIndex::new(src.as_bytes());
+            find_base64_blobs(Path::new("a.rs"), src.as_bytes(), &idx).len()
+        };
+        // The base64 crate's alphabets, including its deliberately broken
+        // test alphabets, reversed, and Base32.
+        for alphabet in [
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+            "AACDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZZbcdefghijklmnopqrstuvwxyz0123456789-_",
+            "xxxxxxxxxABCDEFGHIJKLMNOPQRSTUVWXYZZbcdefghijklmnopqrstuvwxyz0123456789+/",
+            "/+9876543210zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA",
+        ] {
+            assert_eq!(
+                blobs(&format!("let a = \"{alphabet}\";\n")),
+                0,
+                "{alphabet}"
+            );
+        }
+        // Real encoded data still is (from the crate's own tests).
+        let data = "z3Uuv7+Xsn+acg0ZNRsw1/ZEl1FJEMw3kV0N0MaAWbPeUBTyvyVgWiUemvU6kIFqi0RqNs7Fo8IuBCYW7bZq3Q==";
+        assert_eq!(blobs(&format!("let b = \"{data}\";\n")), 1);
     }
 
     #[test]

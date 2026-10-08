@@ -234,7 +234,7 @@ Token pass; language-aware.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `identifier-narrow-charset` | warn | Identifier composed entirely of visually confusable characters (`l`, `I`, `1`, `O`, `0`). Names like `lI1O0lI` are unreadable by design. |
+| `identifier-narrow-charset` | warn | Identifier of four or more characters composed entirely of visually confusable characters (`l`, `I`, `1`, `O`, `0`) that is also ambiguous: it mixes distinct lookalike letters (`l` with `I`, `O` with `I`) or interleaves letters and digits (`l1l1`, `O0O0`). Names like `lI1O0lI` are unreadable by design; a letter followed by a number (`l100`, "list of 100") is not flagged. |
 | `identifier-low-length` | info | File-wide naming-shape signal. Fires when the mean non-conventional identifier length is below 2.0 over at least 20 identifiers, **or** when ≥ 40 % of non-conventional identifiers are exactly one character (over at least 30 identifiers). The second trigger catches IOCCC-style obfuscation where a sprinkling of long keywords (`extern`, `nanosleep`, `TIOCGWINSZ`) inflates the mean above 2.0 even though most globals and functions are single letters. |
 | `string-concat-construction` | warn | String concatenation that reconstructs a sensitive identifier (`exec`, `eval`, `import`, `getattr`, `system`, `require`, `process`, etc.). A common pattern to dodge static keyword grep. |
 

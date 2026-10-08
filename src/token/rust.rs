@@ -81,7 +81,7 @@ pub fn tokenize(bytes: &[u8]) -> Vec<Token> {
         if b == b'\'' {
             if let Some(end) = try_lex_char(bytes, i) {
                 out.push(Token {
-                    kind: TokenKind::Other,
+                    kind: TokenKind::CharLiteral,
                     start: i,
                     end,
                     content_start: i + 1,
@@ -338,9 +338,9 @@ mod tests {
     #[test]
     fn lifetime_is_not_a_char_literal() {
         let toks = tokenize(b"fn f<'a>(x: &'a str) -> &'static str { x }\n");
-        // No Other tokens should appear for the apostrophes — they're all
+        // No char literals should appear for the apostrophes — they're all
         // lifetime labels, not chars.
-        assert!(toks.iter().all(|t| t.kind != TokenKind::Other));
+        assert!(toks.iter().all(|t| t.kind != TokenKind::CharLiteral));
         // `a`, `static`, `x`, `str`, `f`, `x` — identifiers present.
         assert!(toks.iter().any(|t| t.kind == TokenKind::Identifier
             && b"a" == &b"fn f<'a>(x: &'a str) -> &'static str { x }\n"[t.start..t.end]));
@@ -349,12 +349,12 @@ mod tests {
     #[test]
     fn char_literal_is_not_a_lifetime() {
         let toks = tokenize(b"let c = 'x';\n");
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Other));
+        assert!(toks.iter().any(|t| t.kind == TokenKind::CharLiteral));
     }
 
     #[test]
     fn escaped_char_literal() {
         let toks = tokenize(b"let c = '\\n';\n");
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Other));
+        assert!(toks.iter().any(|t| t.kind == TokenKind::CharLiteral));
     }
 }

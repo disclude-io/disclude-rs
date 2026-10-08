@@ -26,6 +26,8 @@ pub mod typescript;
 pub enum TokenKind {
     Comment,
     StringLiteral,
+    /// A C or Rust character literal (`'x'`, `'\n'`, `'О'`).
+    CharLiteral,
     Identifier,
     Operator,
     Other,
@@ -192,9 +194,14 @@ fn reclassify(bytes: &[u8], findings: Vec<Finding>, tokens: &[Token]) -> Vec<Fin
                     }
                 },
                 SignalKind::UnicodeHomoglyph | SignalKind::UnicodeMixedScript => {
+                    // A char literal is data like a string: `('О', &['о'])`
+                    // in a Unicode case-folding table names a letter, it
+                    // doesn't impersonate an identifier.
                     if matches!(
                         ctx,
-                        Some(TokenKind::Comment) | Some(TokenKind::StringLiteral)
+                        Some(TokenKind::Comment)
+                            | Some(TokenKind::StringLiteral)
+                            | Some(TokenKind::CharLiteral)
                     ) {
                         f.severity = Severity::Info;
                         f.confidence = (f.confidence * 0.5).max(0.20);
@@ -271,9 +278,30 @@ fn is_narrow_charset(ident: &str) -> bool {
     if ident.len() < 4 {
         return false;
     }
-    ident
+    if !ident
         .chars()
         .all(|c| matches!(c, 'l' | 'I' | '1' | 'O' | '0'))
+    {
+        return false;
+    }
+    // Being made of confusable characters is not enough: `l100` ("list of
+    // 100") is one letter and a number, read without effort. What makes
+    // `lI1lI` or `O0O0` unreadable is ambiguity, either distinct lookalike
+    // letters mixed together (`l` with `I`, `O` with `I`) or letters and
+    // digits interleaved (`l1l1`), so no run can be read as a word or a number.
+    let mut letters = ident
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .collect::<Vec<_>>();
+    letters.sort_unstable();
+    letters.dedup();
+    let mixed_letters = letters.len() >= 2;
+    let class_changes = ident
+        .as_bytes()
+        .windows(2)
+        .filter(|w| w[0].is_ascii_digit() != w[1].is_ascii_digit())
+        .count();
+    mixed_letters || class_changes >= 2
 }
 
 fn emit_identifier_findings(
@@ -528,6 +556,24 @@ const DANGEROUS_NAMES: &[&str] = &[
     "include_bytes",
 ];
 
+/// True if `name` appears in `text` as a whole word that spans one of the
+/// `joins` (offsets where a concatenated piece begins): `"req" + "uire"`.
+/// A name whole inside one piece needed no concatenation, as in an error
+/// message split over two lines that mentions `type-fest/require-…`, and a
+/// name inside a longer word (`requires`, `important`) is not that name.
+fn reconstructs(text: &str, name: &str, joins: &[usize]) -> bool {
+    let b = text.as_bytes();
+    text.match_indices(name).any(|(start, _)| {
+        let end = start + name.len();
+        let alnum = |i: Option<usize>| {
+            i.and_then(|i| b.get(i))
+                .is_some_and(u8::is_ascii_alphanumeric)
+        };
+        let word = !alnum(start.checked_sub(1)) && !alnum(Some(end));
+        word && joins.iter().any(|&j| start < j && j < end)
+    })
+}
+
 fn emit_concat_findings(
     path: &Path,
     bytes: &[u8],
@@ -557,18 +603,26 @@ fn emit_concat_findings(
             j += 2;
         }
         if last_string_idx > start_idx {
-            // Concatenate the string contents.
+            // Concatenate the string contents, noting where each piece
+            // after the first begins.
             let mut concat = Vec::new();
+            let mut joins = Vec::new();
             let mut k = start_idx;
             while k <= last_string_idx {
                 if tokens[k].kind == TokenKind::StringLiteral {
+                    if !concat.is_empty() {
+                        joins.push(concat.len());
+                    }
                     concat
                         .extend_from_slice(&bytes[tokens[k].content_start..tokens[k].content_end]);
                 }
                 k += 1;
             }
             if let Ok(text) = std::str::from_utf8(&concat) {
-                if let Some(hit) = DANGEROUS_NAMES.iter().find(|name| text.contains(*name)) {
+                if let Some(hit) = DANGEROUS_NAMES
+                    .iter()
+                    .find(|name| reconstructs(text, name, &joins))
+                {
                     let anchor = tokens[start_idx].start;
                     let (line, col) = index.locate(anchor);
                     findings.push(Finding {
@@ -1688,10 +1742,108 @@ mod tests {
             kind: SignalKind::LongLine,
             severity,
             confidence: 0.5,
-            message: "line length N bytes".to_string(),
+            message: "line length N characters".to_string(),
             snippet: String::new(),
             diff_introduced: false,
         }
+    }
+
+    // --- identifier-narrow-charset ---
+
+    #[test]
+    fn concat_must_split_the_name_to_reconstruct_it() {
+        let concat = |src: &str| {
+            let bytes = src.as_bytes();
+            let idx = crate::util::LineIndex::new(bytes);
+            analyze(
+                Path::new("a.js"),
+                bytes,
+                Language::JavaScript,
+                &idx,
+                Vec::new(),
+            )
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::StringConcatConstruction)
+            .count()
+        };
+        for split in [
+            "const a = 'req' + 'uire';\n",
+            "const a = 'child_' + 'process';\n",
+            "const a = '__' + 'import' + '__';\n",
+            "x = obj['ev' + 'al'];\n",
+        ] {
+            assert_eq!(concat(split), 1, "{split}");
+        }
+        for whole in [
+            // type-fest: a message split over two lines.
+            "m = 'Type `{{typeName}}` is exported from this file. '\n  + 'Use `type-fest/require-exported-types` to ignore.';\n",
+            "m = 'This rule requ' + 'ires type information';\n",
+            "m = 'An imp' + 'ortant note';\n",
+            "m = 'file' + 'system';\n",
+        ] {
+            assert_eq!(concat(whole), 0, "{whole}");
+        }
+    }
+
+    #[test]
+    fn homoglyph_in_a_char_literal_is_info_like_a_string() {
+        // regex-syntax's case-folding tables: `('О', &['о', 'ᲂ'])`.
+        let src = "const T: &[(char, &[char])] = &[\n    ('\u{041E}', &['\u{043E}']),\n];\nfn \u{0441}() {}\n";
+        let bytes = src.as_bytes();
+        let idx = crate::util::LineIndex::new(bytes);
+        let (raw, _) = crate::raw::analyze(Path::new("t.rs"), bytes, &idx);
+        let findings = analyze(Path::new("t.rs"), bytes, Language::Rust, &idx, raw);
+        let homoglyphs: Vec<_> = findings
+            .iter()
+            .filter(|f| f.kind == SignalKind::UnicodeHomoglyph)
+            .map(|f| (f.line, f.severity))
+            .collect();
+        // The literals are info; `fn с()`, a Cyrillic function name, stays warn.
+        assert_eq!(
+            homoglyphs,
+            [
+                (2, Severity::Info),
+                (2, Severity::Info),
+                (4, Severity::Warn)
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_charset_needs_ambiguity_not_just_lookalike_chars() {
+        // Obfuscated: mixed lookalike letters, or letters and digits interleaved.
+        for flagged in [
+            "lI1lI", "IlIl", "lI1O0lI", "O0O0", "l1l1", "l0l0", "OlOl", "I0Il",
+        ] {
+            assert!(is_narrow_charset(flagged), "{flagged}");
+        }
+        // Readable: one letter and a number (numpy's `self.l100`), or one
+        // letter repeated; plus names outside the charset or too short.
+        for readable in [
+            "l100", "I0001", "O100", "l000", "llll", "IIII", "lI1", "value", "l100x",
+        ] {
+            assert!(!is_narrow_charset(readable), "{readable}");
+        }
+    }
+
+    #[test]
+    fn narrow_charset_findings_in_python() {
+        let src = b"class B:\n    def setup(self):\n        self.l100 = range(100)\n        lI1lI = O0O0 = 1\n";
+        let idx = LineIndex::new(src);
+        let tokens = tokenize(src, Language::Python);
+        let found: Vec<String> =
+            emit_identifier_findings(&PathBuf::from("b.py"), src, &idx, Language::Python, &tokens)
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::IdentifierNarrowCharset)
+                .map(|f| f.message)
+                .collect();
+        assert_eq!(
+            found,
+            [
+                "identifier `lI1lI` uses only visually confusable chars",
+                "identifier `O0O0` uses only visually confusable chars",
+            ]
+        );
     }
 
     // --- surrogate escape detection ---

@@ -19,7 +19,7 @@ use crate::package_json;
 use crate::raw;
 use crate::scorer;
 use crate::token;
-use crate::util::LineIndex;
+use crate::util::{snippet_around, LineIndex};
 
 /// File-size ceiling: files larger than this are skipped. Pragmatic guard
 /// against accidentally scanning large data files.
@@ -216,7 +216,7 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
     let mut file_flags = FileFlags::default();
 
     if opts.run_raw {
-        let (raw_findings, (mean, max)) = raw::analyze(path, &bytes, &index);
+        let (raw_findings, (mean, max)) = raw::analyze_lang(path, &bytes, &index, Some(language));
         findings.extend(raw_findings);
         complexity_mean = mean;
         complexity_max = max;
@@ -287,7 +287,13 @@ fn analyze_markup_blocks(
     }
 
     for (bi, block) in blocks.iter().enumerate() {
-        let slice = &bytes[block.start..block.end];
+        // A shell block shown as a terminal session is scanned as the
+        // commands typed at its prompts (see `shell_session_commands`).
+        let session = match block.lang {
+            Language::Bash => embedded::shell_session_commands(&bytes[block.start..block.end]),
+            _ => None,
+        };
+        let slice = session.as_deref().unwrap_or(&bytes[block.start..block.end]);
         let local_index = LineIndex::new(slice);
 
         // Re-anchor the block's raw findings to block-local offsets so the
@@ -320,6 +326,11 @@ fn analyze_markup_blocks(
             f.line = line;
             f.col = col;
             f.message = format!("{}{}", tag, f.message);
+            // Quote the session as written, prompts included.
+            if session.is_some() {
+                f.snippet =
+                    crate::finding::redact_snippet(&snippet_around(bytes, f.byte_offset, 80));
+            }
         }
         findings.extend(block_findings);
     }

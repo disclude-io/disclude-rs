@@ -37,6 +37,28 @@ fn is_zero_width(c: char) -> bool {
     matches!(c as u32, 0x200B | 0x200C | 0x200D | 0xFEFF | 0x00AD)
 }
 
+/// Emoji and pictographs, the parts a ZWJ joins into one emoji (an
+/// approximation of `Extended_Pictographic`, which includes the skin-tone
+/// modifiers U+1F3FB–1F3FF).
+fn is_pictographic(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00A9 | 0x00AE | 0x203C | 0x2049 | 0x2122 | 0x2139
+            | 0x2194..=0x21AA | 0x231A..=0x23FF | 0x24C2 | 0x25AA..=0x25FE
+            | 0x2600..=0x27BF | 0x2934 | 0x2935 | 0x2B05..=0x2B55
+            | 0x3030 | 0x303D | 0x3297 | 0x3299 | 0x1F000..=0x1FAFF
+    )
+}
+
+/// A ZWJ between two pictographs (after an optional U+FE0F emoji-style
+/// selector): an emoji ZWJ sequence such as 👨‍👩‍👧‍👦 or 👩‍💻, where the joiner is
+/// how the emoji is written, not something hidden.
+fn is_emoji_zwj(text: &str, offset: usize) -> bool {
+    let before = text[..offset].chars().rev().find(|&c| c != '\u{FE0F}');
+    let after = text[offset + '\u{200D}'.len_utf8()..].chars().next();
+    before.is_some_and(is_pictographic) && after.is_some_and(is_pictographic)
+}
+
 fn bidi_name(c: char) -> &'static str {
     match c as u32 {
         0x202A => "U+202A LEFT-TO-RIGHT EMBEDDING",
@@ -90,7 +112,7 @@ fn scan_bidi_and_zero_width(
                 snippet: redact_snippet(&snippet_around(bytes, offset, 80)),
                 diff_introduced: false,
             });
-        } else if is_zero_width(c) {
+        } else if is_zero_width(c) && !(c == '\u{200D}' && is_emoji_zwj(text, offset)) {
             let (line, col) = index.locate(offset);
             findings.push(Finding {
                 path: path.to_path_buf(),
@@ -305,6 +327,10 @@ fn script_of(c: char) -> Option<Script> {
         0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => Script::Han,
         0x3040..=0x309F => Script::Hiragana,
         0x30A0..=0x30FF => Script::Katakana,
+        // Fullwidth Latin letters and halfwidth katakana, as typed in
+        // Chinese and Japanese text (`你的ＧＵＴＳ`).
+        0xFF21..=0xFF3A | 0xFF41..=0xFF5A => Script::Latin,
+        0xFF66..=0xFF9F => Script::Katakana,
         0xAC00..=0xD7AF | 0x1100..=0x11FF => Script::Hangul,
         _ => Script::Other,
     };
@@ -358,6 +384,17 @@ const HOMOGLYPHS: &[(u32, char)] = &[
     (0x03A2, 'Z'),
 ];
 
+/// Script mixes that are ordinary writing, per UTS #39's "Highly
+/// Restrictive" level: Chinese and Japanese (Han with kana, and Latin for
+/// acronyms and brand names, as in `你当选MVP了`) and Korean (Han, Hangul,
+/// Latin). None of those scripts has Latin lookalikes. Every other mix,
+/// Latin with Cyrillic or Greek above all, is reported.
+fn is_customary_script_mix(scripts: &[Script]) -> bool {
+    use Script::*;
+    let within = |set: &[Script]| scripts.iter().all(|s| set.contains(s));
+    within(&[Latin, Han, Hiragana, Katakana]) || within(&[Latin, Han, Hangul])
+}
+
 fn homoglyph_of(c: char) -> Option<char> {
     let cp = c as u32;
     HOMOGLYPHS
@@ -377,12 +414,64 @@ fn is_ident_cont(c: char) -> bool {
     c == '_' || c.is_alphanumeric()
 }
 
+/// A script making up at least this share of a file's letters means the file
+/// is substantially written in it (a Russian document, a Greek locale file):
+/// words wholly in that script are its language, not lookalike spoofs.
+const WRITTEN_IN_SCRIPT_SHARE: f32 = 0.30;
+
+/// Letters per script across a file, for judging whether a word in some
+/// script is ordinary text or stands out.
+struct ScriptShares {
+    counts: std::collections::HashMap<Script, usize>,
+    total: usize,
+}
+
+impl ScriptShares {
+    fn of(text: &str) -> Self {
+        let mut counts = std::collections::HashMap::new();
+        let mut total = 0;
+        for s in text.chars().filter_map(script_of) {
+            *counts.entry(s).or_insert(0) += 1;
+            total += 1;
+        }
+        ScriptShares { counts, total }
+    }
+
+    fn share(&self, s: Script) -> f32 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        *self.counts.get(&s).unwrap_or(&0) as f32 / self.total as f32
+    }
+}
+
+/// True if the byte at `offset` follows an odd run of backslashes: escaped,
+/// as in `\n`, but not in `\\n` (an escaped backslash, then `n`).
+fn is_escaped(bytes: &[u8], offset: usize) -> bool {
+    bytes[..offset]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
 fn scan_identifiers(path: &Path, bytes: &[u8], text: &str, index: &LineIndex) -> Vec<Finding> {
     let mut findings = Vec::new();
+    // Counted lazily: only files with a non-ASCII identifier need it.
+    let mut shares: Option<ScriptShares> = None;
     let mut chars = text.char_indices().peekable();
 
     while let Some(&(offset, c)) = chars.peek() {
         if !is_ident_start(c) {
+            chars.next();
+            continue;
+        }
+        // The letter of an escape (`\n`, `\t`, `\u…`) is not the start of a
+        // word: in `'நி\nநி'` the `n` would otherwise join the Tamil after it
+        // as a Latin + Tamil "identifier".
+        if c.is_ascii_alphabetic() && is_escaped(text.as_bytes(), offset) {
             chars.next();
             continue;
         }
@@ -402,7 +491,8 @@ fn scan_identifiers(path: &Path, bytes: &[u8], text: &str, index: &LineIndex) ->
         if ident.is_ascii() {
             continue;
         }
-        findings.extend(check_identifier(path, bytes, index, ident, start));
+        let shares = shares.get_or_insert_with(|| ScriptShares::of(text));
+        findings.extend(check_identifier(path, bytes, index, ident, start, shares));
     }
 
     findings
@@ -414,17 +504,21 @@ fn check_identifier(
     index: &LineIndex,
     ident: &str,
     start: usize,
+    shares: &ScriptShares,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // Mixed script
-    let mut scripts = std::collections::HashSet::new();
+    // In order of first appearance, so the message is the same every run.
+    let mut scripts: Vec<Script> = Vec::new();
     for c in ident.chars() {
         if let Some(s) = script_of(c) {
-            scripts.insert(s);
+            if !scripts.contains(&s) {
+                scripts.push(s);
+            }
         }
     }
-    if scripts.len() > 1 {
+    if scripts.len() > 1 && !is_customary_script_mix(&scripts) {
         let (line, col) = index.locate(start);
         let scripts_list: Vec<_> = scripts.iter().map(|s| format!("{:?}", s)).collect();
         findings.push(Finding {
@@ -446,14 +540,29 @@ fn check_identifier(
         });
     }
 
-    // Homoglyph candidates
+    // Homoglyph candidates. A lookalike letter alone is not a spoof: most
+    // Russian words contain `о` or `е`. It is one when the word could be
+    // mistaken for a Latin one, either
+    //   * mixed: Latin letters with lookalikes swapped in (`pаypal`), or
+    //   * whole-script: every letter has a Latin lookalike (`сор`, a lone
+    //     Cyrillic `с`), in a file not itself written in that script, so the
+    //     word stands out (a Cyrillic `с` as a variable in Python code, not
+    //     the word "с" in Russian prose).
     let mut hits: Vec<(char, char)> = Vec::new();
     for c in ident.chars() {
         if let Some(ascii) = homoglyph_of(c) {
             hits.push((c, ascii));
         }
     }
-    if !hits.is_empty() {
+    let letters: Vec<char> = ident.chars().filter(|c| c.is_alphabetic()).collect();
+    let has_latin = letters.iter().any(|&c| script_of(c) == Some(Script::Latin));
+    let whole_script = !letters.is_empty() && letters.iter().all(|&c| homoglyph_of(c).is_some());
+    let stands_out = hits
+        .first()
+        .and_then(|&(c, _)| script_of(c))
+        .is_some_and(|s| shares.share(s) < WRITTEN_IN_SCRIPT_SHARE);
+    let spoof = !hits.is_empty() && (has_latin || (whole_script && stands_out));
+    if spoof {
         let (line, col) = index.locate(start);
         let shown: Vec<_> = hits
             .iter()
@@ -545,6 +654,110 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.kind == SignalKind::UnicodeMixedScript));
+    }
+
+    #[test]
+    fn ordinary_words_in_another_script_are_not_homoglyphs() {
+        let homoglyphs = |src: &str| {
+            run(src.as_bytes())
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::UnicodeHomoglyph)
+                .map(|f| f.message)
+                .collect::<Vec<_>>()
+        };
+        // memchr's Russian subtitle corpus: words with non-lookalike letters
+        // (`было`, `не`) are just Russian, and in a Russian document even
+        // all-lookalike words (`с`, `А`, `сор`) are its language.
+        assert!(homoglyphs("Было не так. А что с ним? Сор и пыль.\n").is_empty());
+        // In Latin code, a variable written entirely in lookalikes stands out.
+        let code = "def total(items):\n    \u{0441} = 0\n    for item in items:\n        \u{0441} += item.price\n    return \u{0441}\n";
+        assert_eq!(homoglyphs(code).len(), 3, "{:?}", homoglyphs(code));
+        // A Russian comment in Latin code: ordinary words still aren't spoofs.
+        assert!(homoglyphs("x = compute(values)  # было много значений\n").is_empty());
+    }
+
+    #[test]
+    fn cjk_writing_with_latin_is_not_mixed_script() {
+        let mixed = |src: &str| {
+            run(src.as_bytes())
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::UnicodeMixedScript)
+                .map(|f| f.message)
+                .collect::<Vec<_>>()
+        };
+        // memchr's Chinese subtitles, Japanese, Korean: ordinary writing.
+        for ok in [
+            "你当选MVP了\n",
+            "你的ＧＵＴＳ去哪里了\n",
+            "日本語のテキストとAPI\n",
+            "한국어API문서\n",
+        ] {
+            assert!(mixed(ok).is_empty(), "{ok}: {:?}", mixed(ok));
+        }
+        // Lookalike-bearing mixes, and mixes outside one writing system.
+        for (bad, scripts) in [
+            ("\u{0440}\u{0430}ssword = 1\n", "Cyrillic + Latin"),
+            ("abcd\u{03B1}\u{03B2}\n", "Latin + Greek"),
+            ("\u{0411}\u{043E}r\n", "Cyrillic + Latin"),
+            ("\u{4E2D}\u{D55C}\u{306E}\n", "Han + Hangul + Hiragana"),
+            ("\u{0E44}\u{0E17}\u{4E2D}\n", "Other + Han"),
+        ] {
+            assert_eq!(mixed(bad).len(), 1, "{bad}");
+            assert!(mixed(bad)[0].ends_with(scripts), "{:?}", mixed(bad));
+        }
+    }
+
+    #[test]
+    fn mixed_script_message_is_stable() {
+        let src = "let s = \"ศไทย中华Việt\";\n";
+        let messages: std::collections::HashSet<String> = (0..20)
+            .flat_map(|_| run(src.as_bytes()))
+            .filter(|f| f.kind == SignalKind::UnicodeMixedScript)
+            .map(|f| f.message)
+            .collect();
+        assert_eq!(
+            messages.into_iter().collect::<Vec<_>>(),
+            ["identifier `ศไทย中华Việt` mixes scripts: Other + Han + Latin"]
+        );
+    }
+
+    #[test]
+    fn zwj_inside_an_emoji_sequence_is_not_hidden() {
+        let zero_width = |src: &str| {
+            run(src.as_bytes())
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::UnicodeZeroWidth)
+                .count()
+        };
+        // wrap-ansi's test: family, plus a profession and a flag (🏳️‍🌈 has
+        // U+FE0F before its joiner).
+        for emoji in [
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}",
+            "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}",
+            "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",
+        ] {
+            assert_eq!(zero_width(&format!("s = '{emoji}'\n")), 0, "{emoji:?}");
+        }
+        // A joiner between letters, or at an emoji's edge, is still hidden.
+        assert_eq!(zero_width("pass\u{200D}word = 1\n"), 1);
+        assert_eq!(zero_width("s = '\u{1F600}\u{200D}a'\n"), 1);
+        assert_eq!(zero_width("s = 'a\u{200D}\u{1F600}'\n"), 1);
+    }
+
+    #[test]
+    fn escape_letters_do_not_join_the_next_word() {
+        let mixed = |src: &str| {
+            run(src.as_bytes())
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::UnicodeMixedScript)
+                .map(|f| f.message)
+                .collect::<Vec<_>>()
+        };
+        // wrap-ansi: Tamil around a `\n` escape.
+        assert!(mixed("s = '\u{0BA8}\u{0BBF}\\n\u{0BA8}\u{0BBF}'\n").is_empty());
+        assert!(mixed("s = '\\t\u{0430}\u{0431}'\n").is_empty());
+        // After an escaped backslash, `n` is a real letter again.
+        assert_eq!(mixed("s = '\\\\n\u{0430}\u{0431}'\n").len(), 1);
     }
 
     #[test]

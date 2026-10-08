@@ -176,7 +176,7 @@ fn regex_context_ok(prev: &[Token]) -> bool {
                 // after them (e.g. `return /pat/`). Accept a conservative set.
                 return false; // default: no regex
             }
-            TokenKind::StringLiteral => return false,
+            TokenKind::StringLiteral | TokenKind::CharLiteral => return false,
             TokenKind::Operator => return true,
             TokenKind::Other => return true,
         }

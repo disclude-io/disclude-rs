@@ -53,3 +53,72 @@ pub fn extract(_path: &Path, bytes: &[u8], lang: Language) -> Vec<CodeBlock> {
         _ => Vec::new(),
     }
 }
+
+/// A shell block written as a terminal session (`$ cmd`, then its output),
+/// as documentation shows commands, rewritten as the commands a reader would
+/// run: prompts become spaces, output lines are blanked, and lines continuing
+/// a command (after a trailing `\`) are kept, less any `> ` prompt. The
+/// result is the same length with the same line breaks, so findings keep
+/// their positions. `None` when no line starts with a `$` prompt (a plain
+/// script, scanned as written).
+pub fn shell_session_commands(block: &[u8]) -> Option<Vec<u8>> {
+    let is_prompt = |line: &[u8]| {
+        let t = line.trim_ascii_start();
+        t == b"$" || t.starts_with(b"$ ")
+    };
+    if !block.split(|&b| b == b'\n').any(is_prompt) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(block.len());
+    let mut continues = false;
+    for (i, line) in block.split(|&b| b == b'\n').enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        let indent = line.len() - line.trim_ascii_start().len();
+        let rest = &line[indent..];
+        let (marker, command) = if is_prompt(line) {
+            (1, true)
+        } else if continues {
+            (if rest.starts_with(b"> ") { 1 } else { 0 }, true)
+        } else {
+            (0, false)
+        };
+        if command {
+            out.extend(std::iter::repeat_n(b' ', indent + marker));
+            out.extend_from_slice(&rest[marker..]);
+            continues = line.trim_ascii_end().ends_with(b"\\");
+        } else {
+            // Output: blank it, keeping a `\r` so line endings are unchanged.
+            out.extend(line.iter().map(|&b| if b == b'\r' { b } else { b' ' }));
+            continues = false;
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_sessions_become_their_commands() {
+        let session = "$ pytest --version\npytest 9.1.1\n$ docker run \\\n> --rm img\n  $ cat failures\ntest_a.py::t1\n";
+        let out = String::from_utf8(shell_session_commands(session.as_bytes()).unwrap()).unwrap();
+        assert_eq!(out.len(), session.len());
+        let lines: Vec<&str> = out.lines().map(str::trim_end).collect();
+        assert_eq!(
+            lines,
+            [
+                "  pytest --version",
+                "",
+                "  docker run \\",
+                "  --rm img",
+                "    cat failures",
+                ""
+            ]
+        );
+        // A script with `$VAR` in it is not a session.
+        assert!(shell_session_commands(b"echo $HOME\n\"$CMD\" --flag\n").is_none());
+    }
+}

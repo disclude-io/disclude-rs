@@ -171,8 +171,14 @@ fn check_call(
     }
     if let Some(name) = qualified.as_deref() {
         match name {
+            // Only on the namespace itself: `vars().get(x)`, not `.get` on
+            // a dict variable named `vars`.
             "globals.get" | "vars.get" | "locals.get" => {
-                if let Some(arg) = args.first() {
+                let on_namespace = func
+                    .child_by_field_name("object")
+                    .and_then(|obj| namespace_base(obj, bytes))
+                    .is_some();
+                if let (true, Some(arg)) = (on_namespace, args.first()) {
                     if !is_literal_expression(*arg, bytes) {
                         push_dynamic_attr(node, bytes, path, index, findings, name);
                     }
@@ -353,21 +359,38 @@ fn check_subscript(
     let Some(subscript) = node.child_by_field_name("subscript") else {
         return;
     };
-    let base = callee_qualified_name(value, bytes);
-    let is_dyn_base = matches!(
-        base.as_deref(),
-        Some("globals") | Some("vars") | Some("locals") | Some("__builtins__")
-    );
-    if !is_dyn_base {
+    let Some(base) = namespace_base(value, bytes) else {
         return;
-    }
+    };
     // The `subscript` field points directly at the index expression in
     // current tree-sitter-python grammars (e.g. the `name` in `x[name]`
     // or the `string` in `x["literal"]`). If it's not a literal, that's a
     // reach-by-name.
     if !is_literal_expression(subscript, bytes) {
-        let base_name = base.as_deref().unwrap_or("dynamic");
-        push_dynamic_attr(node, bytes, path, index, findings, base_name);
+        push_dynamic_attr(node, bytes, path, index, findings, base);
+    }
+}
+
+/// The namespace an expression reaches into by name: a *call* to
+/// `globals()`, `vars()` (or `vars(obj)`), or `locals()`, or the name
+/// `__builtins__`. A variable that merely shares the name (`vars = {}` then
+/// `vars[name]`, as in numpy's f2py) is an ordinary dict, not a namespace.
+fn namespace_base(value: Node, bytes: &[u8]) -> Option<&'static str> {
+    match value.kind() {
+        "call" => {
+            let func = value.child_by_field_name("function")?;
+            if func.kind() != "identifier" {
+                return None;
+            }
+            match node_text(func, bytes) {
+                "globals" => Some("globals"),
+                "vars" => Some("vars"),
+                "locals" => Some("locals"),
+                _ => None,
+            }
+        }
+        "identifier" if node_text(value, bytes) == "__builtins__" => Some("__builtins__"),
+        _ => None,
     }
 }
 
@@ -1759,6 +1782,40 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.kind == SignalKind::DynamicAttribute && f.severity == Severity::Warn));
+    }
+
+    #[test]
+    fn reach_by_name_needs_the_namespace_call_not_a_shadowing_variable() {
+        let dyn_attrs = |src: &[u8]| {
+            run(src)
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::DynamicAttribute)
+                .map(|f| f.message)
+                .collect::<Vec<_>>()
+        };
+        // The namespaces themselves.
+        for (src, base) in [
+            (&b"v = vars()[name]\n"[..], "vars"),
+            (b"v = vars(obj)[name]\n", "vars"),
+            (b"v = locals()[k]\n", "locals"),
+            (b"v = __builtins__[name]\n", "__builtins__"),
+            (b"v = vars().get(name)\n", "vars.get"),
+            (b"v = globals().get(name)\n", "globals.get"),
+        ] {
+            assert_eq!(
+                dyn_attrs(src),
+                [format!("reach-by-name through `{base}`")],
+                "{}",
+                String::from_utf8_lossy(src)
+            );
+        }
+        // numpy f2py: a dict that happens to be named `vars`.
+        let shadowing = b"vars = {}\nfor name in names:\n    vars[name] = {}\n    v = vars[name]\n    w = vars.get(name)\n";
+        assert!(
+            dyn_attrs(shadowing).is_empty(),
+            "{:?}",
+            dyn_attrs(shadowing)
+        );
     }
 
     #[test]

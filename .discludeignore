@@ -1,0 +1,7 @@
+*.min.js
+*.min.css
+node_modules/
+target/
+__pycache__/
+*.pyc
+.git/
