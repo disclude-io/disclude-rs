@@ -257,10 +257,13 @@ pub struct ScanResult {
     pub truncated: bool,
 }
 
+/// The longest snippet kept for a finding, in bytes: room for a finding's
+/// line and a few lines around it, enough to show a whole command or call.
+pub const SNIPPET_MAX: usize = 320;
+
 /// Truncate a snippet to a reasonable context length for reporting.
-/// Per spec: redact if > 120 chars.
 pub fn redact_snippet(s: &str) -> String {
-    const MAX: usize = 120;
+    const MAX: usize = SNIPPET_MAX;
     if s.len() <= MAX {
         s.to_string()
     } else {

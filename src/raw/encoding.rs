@@ -68,6 +68,104 @@ fn is_sri_digest(bytes: &[u8], start: usize, end: usize) -> bool {
     })
 }
 
+/// A path, not data: `//vda1cs4850/workspaces/folderAtRoot/folder1/…` (TypeScript's
+/// test baselines). `/` is a base64 character, so an all-alphanumeric path
+/// is one long base64-shaped run; but encoded data has `/` and `+` each about
+/// once in 64 characters, where a path has a slash every few characters and
+/// no `+`. At least 4 slashes, one per 24 characters or more, and no `+` or
+/// `=`: about a 1% chance for a random 73-character blob, far less longer.
+fn is_path_like(span: &[u8]) -> bool {
+    let slashes = span.iter().filter(|&&b| b == b'/').count();
+    slashes >= 4 && slashes * 24 >= span.len() && !span.contains(&b'+') && !span.contains(&b'=')
+}
+
+/// Share of a span's letters in same-case runs of [`WORD_RUN`] or more at or
+/// above which it is words, not encoding: `ClassDeclarationWithInvalidConst…`
+/// (a TypeScript test path) scores near 1. In base64, of random bytes or of
+/// text, upper and lower case alternate almost at random: measured, no 64-,
+/// 100-, or 256-character sample of random data reached 0.7, and about 1 in
+/// 20,000 of base64-encoded source code did.
+const WORDY_MIN_SHARE: f32 = 0.7;
+const WORD_RUN: usize = 4;
+
+/// The share of `span`'s letters that sit in runs of at least [`WORD_RUN`]
+/// letters of the same case.
+fn wordy_share(span: &[u8]) -> f32 {
+    let (mut letters, mut in_words, mut run, mut upper) = (0usize, 0usize, 0usize, false);
+    let mut close = |run: usize| {
+        if run >= WORD_RUN {
+            in_words += run;
+        }
+    };
+    for &b in span {
+        if b.is_ascii_alphabetic() {
+            letters += 1;
+            if run > 0 && b.is_ascii_uppercase() == upper {
+                run += 1;
+            } else {
+                close(run);
+                run = 1;
+                upper = b.is_ascii_uppercase();
+            }
+        } else {
+            close(run);
+            run = 0;
+        }
+    }
+    close(run);
+    if letters == 0 {
+        return 0.0;
+    }
+    in_words as f32 / letters as f32
+}
+
+/// The shortest base64 line taken as part of a wrapped blob. Wrapped base64
+/// uses 60, 64, or 76 characters a line; ordinary words and identifiers
+/// that happen to end and start lines are far shorter.
+const WRAPPED_MIN_LINE: usize = 40;
+
+/// The lines of a base64 blob that starts with the run `bytes[start..end]`:
+/// while a run of at least [`WRAPPED_MIN_LINE`] ends its line and the next
+/// line, after any indentation, is another such run, they continue one
+/// blob. Returns each line's run; a single entry when the blob is one line.
+fn wrapped_lines(bytes: &[u8], start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut lines = vec![(start, end)];
+    let (mut s, mut e) = (start, end);
+    while e - s >= WRAPPED_MIN_LINE {
+        let next = match (bytes.get(e), bytes.get(e + 1)) {
+            (Some(b'\n'), _) => e + 1,
+            (Some(b'\r'), Some(b'\n')) => e + 2,
+            _ => break,
+        };
+        let mut k = next;
+        while k < bytes.len() && matches!(bytes[k], b' ' | b'\t') {
+            k += 1;
+        }
+        let run_start = k;
+        while k < bytes.len() && is_base64_byte(bytes[k]) {
+            k += 1;
+        }
+        // The last line of a wrapped blob is often short; take it if the
+        // blob already spans a full line before it.
+        if k == run_start {
+            break;
+        }
+        lines.push((run_start, k));
+        (s, e) = (run_start, k);
+    }
+    // A short run that only starts the next line (`abc` in `…\nabc def`)
+    // is not a continuation unless it ends its own line or the blob there.
+    if lines.len() > 1 {
+        let &(ls, le) = lines.last().unwrap();
+        let ends_line = matches!(bytes.get(le), None | Some(b'\n' | b'\r'));
+        let ends_blob = matches!(bytes.get(le), Some(b'"' | b'\'' | b'`'));
+        if le - ls < WRAPPED_MIN_LINE && !ends_line && !ends_blob {
+            lines.pop();
+        }
+    }
+    lines
+}
+
 /// The share of adjacent byte pairs in `span` that differ by exactly one.
 fn sequential_share(span: &[u8]) -> f32 {
     if span.len() < 2 {
@@ -93,8 +191,23 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
         while i < bytes.len() && is_base64_byte(bytes[i]) {
             i += 1;
         }
+        // Base64 wrapped over lines (60, 64, or 76 characters each, as
+        // `base64` and MIME write it) is one blob: join its lines and judge
+        // it once, rather than as a scatter of per-line findings.
+        let lines = wrapped_lines(bytes, start, i);
+        i = lines.last().map_or(i, |&(_, e)| e);
         let end = i;
-        let len = end - start;
+        let joined: Vec<u8>;
+        let span: &[u8] = if lines.len() > 1 {
+            joined = lines
+                .iter()
+                .flat_map(|&(s, e)| bytes[s..e].iter().copied())
+                .collect();
+            &joined
+        } else {
+            &bytes[start..end]
+        };
+        let len = span.len();
         // Minimum length: 64 for unpadded blobs (avoids git SHAs, session
         // IDs, cache keys); 40 for blobs ending with `=` or `==` padding.
         // Base64 padding is definitive proof the blob is encoded data, so we
@@ -106,10 +219,12 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
             continue;
         }
 
-        if is_sri_digest(bytes, start, end) {
+        if lines.len() == 1 && is_sri_digest(bytes, start, end) {
             continue;
         }
-        let span = &bytes[start..end];
+        if is_path_like(span) || wordy_share(span) >= WORDY_MIN_SHARE {
+            continue;
+        }
         // Require BOTH uppercase AND lowercase letters. Hex digests
         // (sha1/sha256) and git refs are the dominant false-positive class
         // and are always single-case; real base64 of ≥32 random bytes
@@ -152,10 +267,19 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
             kind: SignalKind::EncodingBase64,
             severity: Severity::Warn,
             confidence: 0.60,
-            message: format!(
-                "base64-like blob ({} bytes, compression ratio {:.2})",
-                len, ratio
-            ),
+            message: if lines.len() > 1 {
+                format!(
+                    "base64-like blob ({} bytes over {} lines, compression ratio {:.2})",
+                    len,
+                    lines.len(),
+                    ratio
+                )
+            } else {
+                format!(
+                    "base64-like blob ({} bytes, compression ratio {:.2})",
+                    len, ratio
+                )
+            },
             snippet: redact_snippet(&snippet_around(bytes, start, 100)),
             diff_introduced: false,
         });
@@ -359,6 +483,82 @@ mod tests {
     fn run(src: &[u8]) -> Vec<Finding> {
         let idx = LineIndex::new(src);
         analyze(&PathBuf::from("test.py"), src, &idx)
+    }
+
+    #[test]
+    fn file_paths_are_not_base64_blobs() {
+        let blobs = |src: &str| {
+            let idx = LineIndex::new(src.as_bytes());
+            find_base64_blobs(Path::new("x.md"), src.as_bytes(), &idx).len()
+        };
+        // TypeScript's canWatch baselines.
+        for path in [
+            "//vda1cs4850/workspaces/folderAtRoot/folder1/folder2/folder3/folder4/node_modules",
+            "/home/src/workspaces/project/node_modules/typescript/lib/lib2d3dts/Foo99",
+            "c:/Users/username1/AppData/Local/Temp/folder1/folder2/folder3/file4dts",
+        ] {
+            assert_eq!(blobs(&format!("| true | {path} |\n")), 0, "{path}");
+        }
+        // Encoded data that happens to contain slashes still is.
+        let data = "ms1gomXicKOD6eCkaq5wpTWnYKZTyvCnFYlgqDOs8Kj+peCqE47wqt6H4KvzcPCsvmngrdNS8K6e";
+        assert_eq!(blobs(&format!("x = \"{data}\"\n")), 1);
+        let slashy =
+            "YLzk1/C9r9DgvsS58L/PsuDApJvwwW/U4MKEffDDT3bg/xGRf8MUvWODGTXxwxw864MgtXnDIFdg==";
+        assert_eq!(blobs(&format!("x = \"{slashy}\"\n")), 1);
+    }
+
+    #[test]
+    fn words_are_not_base64_blobs() {
+        let blobs = |src: &str| {
+            let idx = LineIndex::new(src.as_bytes());
+            find_base64_blobs(Path::new("x.js"), src.as_bytes(), &idx).len()
+        };
+        // TypeScript's baseline headers: sparse slashes, but words.
+        let header = "//// [tests/cases/compiler/ClassDeclarationWithInvalidConstOnPropertyDeclaration2.ts]\n";
+        assert_eq!(blobs(header), 0);
+        assert!(
+            wordy_share(b"tests/cases/compiler/ClassDeclarationWithInvalidConst")
+                >= WORDY_MIN_SHARE
+        );
+        // Base64, of JSON (an inline source map) or of random bytes, is not.
+        let map = "//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJmaWxlIjoib3V0ZmlsZS5qcyIsInNvdXJjZVJvb3QiOiIifQ==\n";
+        assert_eq!(blobs(map), 1);
+        assert!(
+            wordy_share(
+                b"ms1gomXicKOD6eCkaq5wpTWnYKZTyvCnFYlgqDOs8Kj+peCqE47wqt6H4KvzcPCsvmngrdNS8K6e"
+            ) < 0.3
+        );
+    }
+
+    #[test]
+    fn wrapped_base64_is_one_blob() {
+        let find = |src: &str| {
+            let idx = LineIndex::new(src.as_bytes());
+            find_base64_blobs(Path::new("test_tz.py"), src.as_bytes(), &idx)
+                .into_iter()
+                .map(|f| (f.line, f.message))
+                .collect::<Vec<_>>()
+        };
+        // python-dateutil's tests: a TZif file as base64 wrapped at 76.
+        let blob = "VFppZgAAAAAAAAAAAAAAAAAAAAAAAAAEAAAABAAAABcAAADrAAAABAAAABCeph5wn7rrYKCGAHCh\n\
+                    ms1gomXicKOD6eCkaq5wpTWnYKZTyvCnFYlgqDOs8Kj+peCqE47wqt6H4KvzcPCsvmngrdNS8K6e\n\
+                    S+CvszTwsH4t4LGcUXCyZ0pgs3wzcLRHLGC1XBVwticOYLc793C4BvBguRvZcLnm0mC7BPXwu8a0\n\
+                    YLzk1/C9r9DgvsS58L+PsuDApJvwwW+U4MKEffDDT3bgxGRf8MUvWODGTXxwxw864MgtXnDI+Fdg\n\
+                    yg1AcMrYOWDLiPBw0iP0cNJg++DTdeTw1EDd4NVVxvDWIL/g1zWo8NgAoeDZ\n";
+        let got = find(&format!("TZFILE = b\"\"\"\n{blob}\"\"\"\n"));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, 2);
+        assert!(got[0].1.contains("over 5 lines"), "{}", got[0].1);
+        // Indented continuation lines (a PEM body in YAML) join too.
+        let indented = blob
+            .lines()
+            .map(|l| format!("    {l}\n"))
+            .collect::<String>();
+        assert_eq!(find(&format!("key: |\n{indented}")).len(), 1);
+        // A single long line is reported as before, without a line count.
+        let one = find(&format!("x = \"{}\"\n", blob.lines().nth(1).unwrap()));
+        assert_eq!(one.len(), 1);
+        assert!(!one[0].1.contains("lines"), "{}", one[0].1);
     }
 
     #[test]

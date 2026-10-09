@@ -212,7 +212,7 @@ These run on every file regardless of language.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `encoding-base64` | warn | Base64-shaped blob in a string literal. Threshold: ≥64 chars for unpadded blobs; ≥40 chars when the blob ends with `=` or `==` padding (padding is definitive proof of base64 encoding, ruling out hex digests and identifiers). Often used to embed payloads or C2 URLs that are decoded and requested at runtime. Demoted to `info` outside string literals. Not reported for an alphabet written out in order (`ABCD…xyz0123…+/`), or for a Subresource Integrity digest (`sha256-`/`sha384-`/`sha512-` followed by exactly that digest's base64 length), as in lockfiles and HTML `integrity` attributes. |
+| `encoding-base64` | warn | Base64-shaped blob in a string literal. Threshold: ≥64 chars for unpadded blobs; ≥40 chars when the blob ends with `=` or `==` padding (padding is definitive proof of base64 encoding, ruling out hex digests and identifiers). Often used to embed payloads or C2 URLs that are decoded and requested at runtime. Demoted to `info` outside string literals. Not reported for an alphabet written out in order (`ABCD…xyz0123…+/`), or for a Subresource Integrity digest (`sha256-`/`sha384-`/`sha512-` followed by exactly that digest's base64 length), as in lockfiles and HTML `integrity` attributes. Base64 wrapped over lines (each line ≥40 characters, indentation allowed, as `base64`, MIME and PEM write it) is joined and judged once as a single blob, reported at its first line. |
 | `encoding-hex` | warn | Long run of `\xNN` hex escape sequences in a string literal. A common way to embed shellcode or obfuscated text. Demoted to `info` outside string literals. |
 | `encoding-octal` | warn | Long run of `\NNN` octal escape sequences (≥6 consecutive, minimum entropy 2.5 bits/byte). Octal is less recognizable than hex and valid in C, Python, and JavaScript — used to encode arbitrary bytes or hide printable characters (`\101` for `A`, `\012` for newline). Demoted to `info` outside string literals. |
 | `encoding-escape-soup` | warn | Dense mix of arbitrary escape sequences. Indicates content that has been serialized or obfuscated to avoid plain-text grep. |
@@ -335,6 +335,11 @@ AST pass; language-specific.
 
 
 ## What is New
+
+### 3.5.0
+
+Numerous refinements to base64 detection.
+Line-aware snippets.
 
 ### 3.4.0
 
