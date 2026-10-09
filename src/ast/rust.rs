@@ -39,6 +39,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
             findings: Vec::new(),
             parse_error: Some("tree-sitter: set_language failed".into()),
             file_flags: FileFlags::default(),
+            data_spans: Vec::new(),
         };
     }
     let Some(tree) = parser.parse(bytes, None) else {
@@ -46,6 +47,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
             findings: Vec::new(),
             parse_error: Some("tree-sitter: parse returned None".into()),
             file_flags: FileFlags::default(),
+            data_spans: Vec::new(),
         };
     };
     let root = tree.root_node();
@@ -74,6 +76,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
         file_flags: FileFlags {
             contains_unsafe: state.contains_unsafe,
         },
+        data_spans: Vec::new(),
     }
 }
 

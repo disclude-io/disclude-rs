@@ -35,6 +35,27 @@ pub struct AstOutcome {
     pub findings: Vec<Finding>,
     pub parse_error: Option<String>,
     pub file_flags: FileFlags,
+    /// Byte ranges the analysis identified as data a known library parses
+    /// and never runs (protobuf descriptors in generated `*_pb2.py`):
+    /// encoding-shaped findings inside them are dropped (see
+    /// [`is_data_shape_kind`]).
+    pub data_spans: Vec<(usize, usize)>,
+}
+
+/// Signals about how bytes *look* (encoded, escaped, high-entropy), which a
+/// [`AstOutcome::data_spans`] range explains. Anything about what code
+/// *does* is never dropped this way.
+pub fn is_data_shape_kind(kind: crate::finding::SignalKind) -> bool {
+    use crate::finding::SignalKind::*;
+    matches!(
+        kind,
+        EncodingBase64
+            | EncodingHex
+            | EncodingOctal
+            | EncodingEscapeSoup
+            | PayloadBytesLiteral
+            | HighComplexity
+    )
 }
 
 pub fn analyze(path: &Path, bytes: &[u8], lang: Language) -> AstOutcome {

@@ -209,6 +209,49 @@ fn try_decode_invisible_payload(chars: &[char]) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// True if the variation selector at `offset` is ordinary emoji presentation:
+/// one U+FE0F (emoji style) or U+FE0E (text style) directly after a
+/// character that has both forms (`⚠️`, `✔️`, `❤️`), or in a keycap (`1️⃣`:
+/// digit, U+FE0F, U+20E3). A second selector after it is not: a run of
+/// selectors after an emoji is how a glassworm payload would hide.
+fn is_emoji_presentation(text: &str, offset: usize, c: char) -> bool {
+    if !matches!(c, '\u{FE0E}' | '\u{FE0F}') {
+        return false;
+    }
+    let prev = text[..offset].chars().next_back();
+    let next = text[offset + c.len_utf8()..].chars().next();
+    let base = prev.is_some_and(is_pictographic)
+        || (prev.is_some_and(|p| p.is_ascii_digit() || p == '#' || p == '*')
+            && next == Some('\u{20E3}'));
+    base && !next.is_some_and(is_tag_char)
+}
+
+/// The only emoji tag sequences Unicode recommends (UTS #51): the flags of
+/// England, Scotland, and Wales, a black flag (U+1F3F4) followed by tag
+/// characters spelling `gbeng`/`gbsct`/`gbwls` and a cancel tag (U+E007F).
+const SUBDIVISION_FLAGS: &[&str] = &["gbeng", "gbsct", "gbwls"];
+
+/// Byte offsets of the tag characters in `text` that belong to one of the
+/// [`SUBDIVISION_FLAGS`]. Fixed sequences, so nothing can be encoded in them.
+fn subdivision_flag_tags(text: &str) -> std::collections::HashSet<usize> {
+    let mut tags = std::collections::HashSet::new();
+    for (flag, _) in text.match_indices('\u{1F3F4}') {
+        let rest = &text[flag + '\u{1F3F4}'.len_utf8()..];
+        for code in SUBDIVISION_FLAGS {
+            let seq: String = code
+                .chars()
+                .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())
+                .chain(std::iter::once('\u{E007F}'))
+                .collect();
+            if rest.starts_with(&seq) {
+                let start = flag + '\u{1F3F4}'.len_utf8();
+                tags.extend(seq.char_indices().map(|(i, _)| start + i));
+            }
+        }
+    }
+    tags
+}
+
 /// When ≥ this many invisible tag characters appear on the same source line,
 /// aggregate them into a single CRITICAL finding instead of per-char warnings.
 const INVISIBLE_CLUSTER_THRESHOLD: usize = 4;
@@ -216,8 +259,9 @@ const INVISIBLE_CLUSTER_THRESHOLD: usize = 4;
 fn scan_tag_chars(path: &Path, bytes: &[u8], text: &str, index: &LineIndex) -> Vec<Finding> {
     // Group (offset, col, char) tuples by line.
     let mut by_line: HashMap<usize, Vec<(usize, usize, char)>> = HashMap::new();
+    let flags = subdivision_flag_tags(text);
     for (offset, c) in text.char_indices() {
-        if is_tag_char(c) {
+        if is_tag_char(c) && !is_emoji_presentation(text, offset, c) && !flags.contains(&offset) {
             let (line, col) = index.locate(offset);
             by_line.entry(line).or_default().push((offset, col, c));
         }
@@ -758,6 +802,58 @@ mod tests {
         assert!(mixed("s = '\\t\u{0430}\u{0431}'\n").is_empty());
         // After an escaped backslash, `n` is a real letter again.
         assert_eq!(mixed("s = '\\\\n\u{0430}\u{0431}'\n").len(), 1);
+    }
+
+    #[test]
+    fn emoji_presentation_selectors_are_not_hidden_payloads() {
+        let invisible = |src: &str| {
+            run(src.as_bytes())
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::UnicodeInvisible)
+                .map(|f| f.severity)
+                .collect::<Vec<_>>()
+        };
+        // bitflags' CHANGELOG heading, and a line of common emoji (four
+        // selectors, which would otherwise be one critical "payload").
+        assert!(invisible("### \u{26A0}\u{FE0F} Traits\n").is_empty());
+        assert!(invisible(
+            "\u{26A0}\u{FE0F} a \u{2714}\u{FE0F} b \u{2764}\u{FE0F} c \u{263A}\u{FE0E} d 1\u{FE0F}\u{20E3}\n"
+        )
+        .is_empty());
+        // The England, Scotland, and Wales flags (tag sequences), but not a
+        // black flag followed by other tags.
+        let flag = |code: &str| -> String {
+            std::iter::once('\u{1F3F4}')
+                .chain(
+                    code.chars()
+                        .map(|c| char::from_u32(0xE0000 + c as u32).unwrap()),
+                )
+                .chain(std::iter::once('\u{E007F}'))
+                .collect()
+        };
+        assert!(invisible(&format!(
+            "{} {} {}\n",
+            flag("gbeng"),
+            flag("gbsct"),
+            flag("gbwls")
+        ))
+        .is_empty());
+        assert_eq!(
+            invisible(&format!("x = \"{}\"\n", flag("hello"))),
+            [Severity::Critical]
+        );
+        // A run of selectors after an emoji is still a payload.
+        let run_after_emoji: String = std::iter::once('\u{1F600}')
+            .chain((0..8).map(|i| char::from_u32(0xFE00 + i).unwrap()))
+            .collect();
+        assert_eq!(
+            invisible(&format!("x = \"{run_after_emoji}\"\n")),
+            [Severity::Critical]
+        );
+        // After a letter or digit (not a keycap), or another selector, it counts.
+        assert_eq!(invisible("x = \"a\u{FE0F}\"\n"), [Severity::Warn]);
+        assert_eq!(invisible("x = \"1\u{FE0F}\"\n"), [Severity::Warn]);
+        assert_eq!(invisible("x = \"\u{26A0}\u{FE01}\"\n"), [Severity::Warn]);
     }
 
     #[test]

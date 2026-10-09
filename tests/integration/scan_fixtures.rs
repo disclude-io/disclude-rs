@@ -2048,6 +2048,37 @@ fn rst_shell_session_scans_the_commands_not_the_prompts() {
 }
 
 #[test]
+fn protobuf_descriptors_are_data_but_lookalikes_are_not() {
+    // grpc's generated cel/expr/conformance/conformance_service_pb2.py: its
+    // descriptor and options literals are protobuf data, not payloads.
+    let r = run();
+    let findings = |name: &str| {
+        r.files
+            .iter()
+            .find(|fa| fa.path.to_string_lossy().ends_with(name))
+            .map(|fa| fa.findings.clone())
+            .unwrap_or_default()
+    };
+    let generated = findings("python/protobuf_descriptor_pb2.py");
+    assert!(
+        generated.iter().all(|f| !matches!(
+            f.kind,
+            SignalKind::PayloadBytesLiteral | SignalKind::EncodingOctal | SignalKind::EncodingHex
+        )),
+        "{generated:?}"
+    );
+    // Random bytes given to AddSerializedFile, and a real descriptor given
+    // to exec, are not exempt.
+    let lookalike = findings("python/protobuf_lookalike.py");
+    let payload_lines: Vec<usize> = lookalike
+        .iter()
+        .filter(|f| f.kind == SignalKind::PayloadBytesLiteral)
+        .map(|f| f.line)
+        .collect();
+    assert_eq!(payload_lines, [5, 8], "{lookalike:?}");
+}
+
+#[test]
 fn text_file_bidi_payload_is_scanned() {
     // Plain .txt gets the global raw payload pass: a bidi override is flagged.
     let r = run();

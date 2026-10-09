@@ -238,6 +238,17 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
             findings.extend(outcome.findings);
             parse_error = outcome.parse_error;
             file_flags = outcome.file_flags;
+            // Data a known library parses (protobuf descriptors): how it
+            // looks is explained; what code does with it is not affected.
+            if !outcome.data_spans.is_empty() {
+                findings.retain(|f| {
+                    !(ast::is_data_shape_kind(f.kind)
+                        && outcome
+                            .data_spans
+                            .iter()
+                            .any(|&(s, e)| f.byte_offset >= s && f.byte_offset < e))
+                });
+            }
         }
 
         scorer::elevate(&mut findings, language, file_flags);
