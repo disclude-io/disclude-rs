@@ -65,19 +65,31 @@ pub fn indentation_has_one_convention(lang: Language) -> bool {
 // Long lines
 // ---------------------------------------------------------------------------
 
-/// Lines within this many of a long line are its neighbourhood.
-const TABLE_NEIGHBOURS: usize = 3;
+/// Lines within this many of a long line are its neighbourhood: wide enough
+/// for records that alternate long and short lines (NIST test vectors:
+/// `P = <hex>` then `counter = 1`).
+const TABLE_NEIGHBOURS: usize = 10;
 /// How many neighbours at least [`TABLE_SIMILAR`] as long make a long line
-/// part of a layout block (a table's rows), not a line that stands out.
+/// part of a layout or data block (a table's rows, a file of records), not
+/// a line that stands out.
 const TABLE_MIN_SIMILAR: usize = 3;
 const TABLE_SIMILAR: f32 = 0.8;
+/// A long line is ordinary for its file when other lines at least this share
+/// of its length make up [`FILE_TYPICAL_FRACTION`] of the file's non-blank
+/// lines (and number at least [`TABLE_MIN_SIMILAR`]): data files such as RSA
+/// test vectors, where long hex lines are a tenth or more of the file. In
+/// code a long line still stands out.
+const FILE_TYPICAL_SHARE: f32 = 0.5;
+const FILE_TYPICAL_FRACTION: f32 = 0.1;
 
 fn scan_long_lines(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
     let _ = index; // long-line location is always (line_num, 1), don't need the index
-                   // (start byte, length in characters) per line. Characters, not bytes:
-                   // the signal is about width on screen, and Cyrillic or CJK text takes
-                   // two or three bytes a character.
+
+    // (start byte, length in characters) per line. Characters, not bytes:
+    // the signal is about width on screen, and Cyrillic or CJK text takes
+    // two or three bytes a character.
     let mut lines = Vec::new();
+    let mut texts: Vec<&[u8]> = Vec::new();
     let mut offset = 0usize;
     for line in bytes.split(|&b| b == b'\n') {
         let chars = match std::str::from_utf8(line) {
@@ -85,11 +97,20 @@ fn scan_long_lines(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding>
             Err(_) => line.len(),
         };
         lines.push((offset, chars));
+        texts.push(line);
         offset += line.len() + 1;
     }
+    // Non-blank line lengths, sorted, to count lines at least so long.
+    let mut sorted: Vec<usize> = lines.iter().map(|&(_, n)| n).filter(|&n| n > 0).collect();
+    sorted.sort_unstable();
     let mut findings = Vec::new();
     for (i, &(line_start, len)) in lines.iter().enumerate() {
-        if len > LONG_LINE_INFO && len <= LONG_LINE_WARN && in_layout_block(&lines, i) {
+        if len > LONG_LINE_INFO
+            && len <= LONG_LINE_WARN
+            && (in_layout_block(&lines, i)
+                || typical_for_file(&sorted, len)
+                || (in_declaration_run(&texts, i) && !has_whitespace_gap(texts[i])))
+        {
             continue;
         }
         emit_long_line(&mut findings, path, bytes, line_start, i + 1, len);
@@ -97,9 +118,61 @@ fn scan_long_lines(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding>
     findings
 }
 
+/// Bytes two lines must share at their start to count as the same kind of
+/// line: `windows_link::link!(`, whichever DLL follows.
+const RUN_PREFIX: usize = 20;
+/// A gap this wide after a line's first non-blank character is how code is
+/// pushed past the right edge of the screen.
+const WHITESPACE_GAP: usize = 16;
+
+/// True if at least [`TABLE_MIN_SIMILAR`] lines within [`TABLE_NEIGHBOURS`]
+/// start with the same [`RUN_PREFIX`] bytes as line `i`: one of a run of
+/// generated declarations (windows-sys bindings), long because its
+/// parameter list is, not because it hides something.
+fn in_declaration_run(texts: &[&[u8]], i: usize) -> bool {
+    let Some(prefix) = texts[i].get(..RUN_PREFIX) else {
+        return false;
+    };
+    let lo = i.saturating_sub(TABLE_NEIGHBOURS);
+    let hi = (i + TABLE_NEIGHBOURS).min(texts.len() - 1);
+    (lo..=hi)
+        .filter(|&j| j != i && texts[j].get(..RUN_PREFIX) == Some(prefix))
+        .count()
+        >= TABLE_MIN_SIMILAR
+}
+
+/// True if `line` has a run of [`WHITESPACE_GAP`] or more spaces or tabs
+/// after its first non-blank character.
+fn has_whitespace_gap(line: &[u8]) -> bool {
+    let Some(start) = line.iter().position(|b| !matches!(b, b' ' | b'\t')) else {
+        return false;
+    };
+    let mut run = 0;
+    for &b in &line[start..] {
+        run = if matches!(b, b' ' | b'\t') {
+            run + 1
+        } else {
+            0
+        };
+        if run >= WHITESPACE_GAP {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if enough of the file's other lines (`sorted`: non-blank lengths,
+/// ascending, including this one) are at least half as long as `len`.
+fn typical_for_file(sorted: &[usize], len: usize) -> bool {
+    let floor = (FILE_TYPICAL_SHARE * len as f32).ceil() as usize;
+    let others = sorted.len() - sorted.partition_point(|&n| n < floor) - 1;
+    others >= TABLE_MIN_SIMILAR && others as f32 >= FILE_TYPICAL_FRACTION * sorted.len() as f32
+}
+
 /// True if enough lines around line `i` are nearly as long: the rows of a
-/// padded table (pytest's plugin list) rather than one line that runs far
-/// past the rest, as code hidden off the right edge of the screen does.
+/// padded table (pytest's plugin list) or a data file's records
+/// (cryptography's test vectors) rather than one line that runs far past
+/// the rest, as code hidden off the right edge of the screen does.
 fn in_layout_block(lines: &[(usize, usize)], i: usize) -> bool {
     let len = lines[i].1 as f32;
     let lo = i.saturating_sub(TABLE_NEIGHBOURS);
@@ -439,6 +512,43 @@ mod tests {
         };
         // 300 Cyrillic characters are 600 bytes but not a long line.
         assert!(long(format!("{}\n", "\u{0436}".repeat(300))).is_empty());
+        // Records alternating long and short lines (cryptography's vectors).
+        let records: String = (0..8)
+            .map(|i| format!("counter = {i}\nP = {}\n", "c".repeat(514)))
+            .collect();
+        assert!(long(records).is_empty());
+        // A key file: a few 512-character moduli among 256-character primes
+        // and short labels, too sparse for any neighbourhood.
+        let mut key = String::new();
+        for _ in 0..4 {
+            key.push_str(&format!(
+                "# Modulus:\n{}\n# Exponent:\n10001\n",
+                "b".repeat(512)
+            ));
+            for label in ["Prime 1", "Prime 2", "Coefficient"] {
+                key.push_str(&format!("# {label}:\n{}\n", "d".repeat(256)));
+            }
+            key.push_str(&"# a comment line\n".repeat(12));
+        }
+        assert!(long(key).is_empty());
+        // Generated declarations (windows-sys): one long signature among
+        // shorter ones of the same shape.
+        let decl = |args: usize| {
+            format!(
+                "windows_link::link!(\"iphlpapi.dll\" \"system\" fn F({}) -> u32);\n",
+                "a : u32, ".repeat(args)
+            )
+        };
+        let bindings: String = [3, 5, 2, 60, 4, 3].iter().map(|&n| decl(n)).collect();
+        assert!(long(bindings).is_empty());
+        // ... unless that line pushes code past the screen's edge.
+        let mut hidden: String = [3, 5, 2].iter().map(|&n| decl(n)).collect();
+        hidden.push_str(&format!(
+            "windows_link::link!(\"iphlpapi.dll\" \"system\" fn F() -> u32);{}std::process::exit(0);\n",
+            " ".repeat(500)
+        ));
+        hidden.push_str(&decl(4));
+        assert_eq!(long(hidden).len(), 1);
         // A padded table: rows of 480–510 characters together.
         let row = |n: usize| format!("   :pypi:`p`   {}\n", "d".repeat(n));
         let table: String = [480, 470, 495, 510, 475, 490, 485]

