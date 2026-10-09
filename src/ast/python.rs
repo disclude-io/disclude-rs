@@ -75,11 +75,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
             "assignment" => check_assignment(node, bytes, path, index, findings),
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 
@@ -1086,11 +1082,7 @@ fn check_payload_bytes_literals(
             }
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 
@@ -1310,11 +1302,7 @@ fn collect_decoder_imports_and_exec<'a>(
             }
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
     (imports, exec_call)
 }
@@ -1459,11 +1447,7 @@ fn check_decoder_decompress_payload(
             }
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 
     if imports.is_empty() || decompress_call.is_none() {
@@ -1515,11 +1499,7 @@ fn check_obfuscated_byte_strings(
         if node.kind() == "call" {
             inspect_bytes_list_decode(node, bytes, path, index, findings);
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 
@@ -1645,11 +1625,7 @@ fn check_frame_introspection(
                 has_elevation_trigger = true;
             }
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 
     if intro_calls.is_empty() {

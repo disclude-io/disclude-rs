@@ -92,11 +92,7 @@ fn collect_assignments(root: Node, bytes: &[u8]) -> Assignments {
                     .or_insert(false) |= runs_code;
             }
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
     out
 }
@@ -159,11 +155,7 @@ fn walk(
             "file_redirect" => check_redirect_command_shadow(node, bytes, path, index, findings),
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 

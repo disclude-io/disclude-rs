@@ -54,6 +54,20 @@ fn compression_ratio(bytes: &[u8]) -> f32 {
 /// three times its length in ordered padding.
 const ALPHABET_MIN_SEQUENTIAL: f32 = 0.75;
 
+/// Subresource Integrity hash prefixes and the base64 length of each digest:
+/// `sha512-<88 chars>` in `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+/// and HTML `integrity` attributes.
+const SRI_DIGESTS: &[(&[u8], usize)] = &[(b"sha256-", 44), (b"sha384-", 64), (b"sha512-", 88)];
+
+/// True if `bytes[start..end]` is the digest of an SRI hash: preceded by its
+/// algorithm prefix and exactly that digest's base64 length. A hash, not
+/// encoded content; it decodes to nothing that could run.
+fn is_sri_digest(bytes: &[u8], start: usize, end: usize) -> bool {
+    SRI_DIGESTS.iter().any(|&(prefix, len)| {
+        end - start == len && start >= prefix.len() && &bytes[start - prefix.len()..start] == prefix
+    })
+}
+
 /// The share of adjacent byte pairs in `span` that differ by exactly one.
 fn sequential_share(span: &[u8]) -> f32 {
     if span.len() < 2 {
@@ -92,6 +106,9 @@ fn find_base64_blobs(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Findin
             continue;
         }
 
+        if is_sri_digest(bytes, start, end) {
+            continue;
+        }
         let span = &bytes[start..end];
         // Require BOTH uppercase AND lowercase letters. Hex digests
         // (sha1/sha256) and git refs are the dominant false-positive class
@@ -342,6 +359,35 @@ mod tests {
     fn run(src: &[u8]) -> Vec<Finding> {
         let idx = LineIndex::new(src);
         analyze(&PathBuf::from("test.py"), src, &idx)
+    }
+
+    #[test]
+    fn sri_integrity_hashes_are_not_base64_blobs() {
+        let blobs = |src: &str| {
+            let idx = LineIndex::new(src.as_bytes());
+            find_base64_blobs(Path::new("pnpm-lock.yaml"), src.as_bytes(), &idx).len()
+        };
+        let sha512 = "Ttkx4a7Y1z9QmB2rC3sD4tE5uF6vG7wH8xI9yJ0zK1aL2bM3cN4dO5eP6fQ7gR8hS9iT0jU1kV2lW3mX4n+Yvq==";
+        let sha384 = "oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC";
+        let sha256 = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+        assert_eq!(sha512.len(), 88);
+        for (alg, digest) in [("sha512", sha512), ("sha384", sha384), ("sha256", sha256)] {
+            assert_eq!(
+                blobs(&format!("  resolution: {{integrity: {alg}-{digest}}}\n")),
+                0,
+                "{alg}"
+            );
+        }
+        assert_eq!(
+            blobs(&format!(
+                "<script integrity=\"sha384-{sha384}\"></script>\n"
+            )),
+            0
+        );
+        // The same characters without the prefix, or with a digest of the
+        // wrong length behind it, are still base64.
+        assert_eq!(blobs(&format!("data = \"{sha512}\"\n")), 1);
+        assert_eq!(blobs(&format!("x: sha512-{sha512}{sha384}\n")), 1);
     }
 
     #[test]

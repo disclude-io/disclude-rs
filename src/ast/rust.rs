@@ -97,11 +97,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, state: &mut St
             "unsafe_block" => state.contains_unsafe = true,
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 

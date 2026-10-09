@@ -122,11 +122,7 @@ fn walk(root: Node, bytes: &[u8], path: &Path, index: &LineIndex, findings: &mut
             }
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 
@@ -672,11 +668,7 @@ fn collect_numeric_arrays(root: Node, bytes: &[u8]) -> Vec<NumericArray> {
                 out.push(arr);
             }
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
     out
 }
@@ -768,11 +760,7 @@ fn walk_casts(
                 }
             }
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 
@@ -1132,11 +1120,7 @@ fn first_identifier_text<'a>(root: Node<'a>, bytes: &'a [u8]) -> Option<&'a str>
         if node.kind() == "identifier" {
             return std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).ok();
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
     None
 }

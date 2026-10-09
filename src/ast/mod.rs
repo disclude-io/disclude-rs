@@ -51,3 +51,48 @@ pub fn analyze(path: &Path, bytes: &[u8], lang: Language) -> AstOutcome {
         }
     }
 }
+
+/// Push `node`'s children onto a depth-first `stack` so they pop in source
+/// order. Iterates with a cursor: `Node::child(i)` walks from the first
+/// child on every call, so indexing through n children is O(n²), and
+/// TypeScript's `reallyLargeFile.ts` (583,711 comment lines under one node)
+/// took hours.
+pub(crate) fn push_children<'a>(
+    node: tree_sitter::Node<'a>,
+    stack: &mut Vec<tree_sitter::Node<'a>>,
+) {
+    let start = stack.len();
+    let mut cursor = node.walk();
+    stack.extend(node.children(&mut cursor));
+    stack[start..].reverse();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walks_are_linear_in_a_node_with_many_children() {
+        // reallyLargeFile.ts in TypeScript's own tests: 583,711 comment lines,
+        // all children of the root node. 100,000 here: the old indexed walk
+        // needed minutes per language for this, a cursor walk milliseconds.
+        let lines = 100_000;
+        for (lang, line, ext) in [
+            (Language::TypeScript, "////\n", "ts"),
+            (Language::JavaScript, "////\n", "js"),
+            (Language::Python, "#\n", "py"),
+            (Language::Bash, "#\n", "sh"),
+            (Language::C, "//\n", "c"),
+            (Language::Rust, "//\n", "rs"),
+        ] {
+            let src = line.repeat(lines);
+            let t = std::time::Instant::now();
+            analyze(Path::new(&format!("big.{ext}")), src.as_bytes(), lang);
+            assert!(
+                t.elapsed() < std::time::Duration::from_secs(10),
+                "{lang:?} took {:?}",
+                t.elapsed()
+            );
+        }
+    }
+}

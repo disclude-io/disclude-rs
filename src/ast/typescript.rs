@@ -112,11 +112,7 @@ fn walk(
             "yield_expression" => check_yield(node, bytes, path, index, findings),
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
 }
 
@@ -839,11 +835,7 @@ fn collect_data_uri_vars(root: Node, bytes: &[u8]) -> HashSet<String> {
                 }
             }
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
     names
 }
@@ -875,11 +867,7 @@ fn collect_tag_deobfuscators(root: Node, bytes: &[u8]) -> HashSet<String> {
             }
             _ => {}
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
     names
 }
@@ -977,11 +965,8 @@ fn body_has_decode_op(body: Node, bytes: &[u8]) -> bool {
                 }
             }
         }
-        for i in 0..node.child_count() as u32 {
-            if let Some(c) = node.child(i) {
-                stack.push(c);
-            }
-        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
     }
     false
 }
@@ -1238,11 +1223,7 @@ fn collect_error_stack_vars(root: Node, bytes: &[u8]) -> HashSet<String> {
                 }
             }
         }
-        for i in (0..node.child_count() as u32).rev() {
-            if let Some(child) = node.child(i) {
-                stack.push(child);
-            }
-        }
+        super::push_children(node, &mut stack);
     }
     names
 }
