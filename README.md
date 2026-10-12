@@ -338,6 +338,10 @@ AST pass; language-specific.
 
 ## What is New
 
+### 3.8.0
+
+Improvements to LLM prompts and caching.
+
 ### 3.7.0
 
 Improvements to heuristic signal detections.
