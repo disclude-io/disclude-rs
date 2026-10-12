@@ -99,8 +99,13 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     if !arrays.is_empty() {
         check_numeric_payload_casts(root, bytes, path, &index, &mut findings, &arrays);
     }
-    check_legacy_kr_main(root, bytes, path, &index, &mut findings);
-    check_implicit_int_functions(root, bytes, path, &index, &mut findings);
+    // C++ headers (`.h` in Arrow, Abseil, …) parse as C with recovery: a
+    // `template <…>` or a member function reads as a function lacking its
+    // return type. Those checks are about C written pre-ANSI; C++ is not.
+    if !is_cpp(root, bytes) {
+        check_legacy_kr_main(root, bytes, path, &index, &mut findings);
+        check_implicit_int_functions(root, bytes, path, &index, &mut findings);
+    }
     check_reverse_subscript_macros(root, bytes, path, &index, &mut findings);
     check_stringify_dereference_macros(root, bytes, path, &index, &mut findings);
     check_macro_keyword_overrides(root, bytes, path, &index, &mut findings);
@@ -968,6 +973,39 @@ fn check_legacy_kr_main(
 //                    `compound_statement` — the heaviest recovery, used when
 //                    the parser couldn't even partially split the signature.
 const IMPLICIT_INT_MIN_COUNT: usize = 3;
+
+/// True if the code (not its comments or strings) has C++ that C never
+/// does: `template <` or `namespace name {` (or `namespace {`). Either one
+/// fails to compile as C, so code can't add it to dodge the C checks.
+fn is_cpp(root: Node, bytes: &[u8]) -> bool {
+    let mut leaves: Vec<&[u8]> = Vec::new();
+    collect_code_leaves(root, bytes, &mut leaves);
+    leaves.windows(3).any(|w| match w {
+        [b"template", b"<", _] => true,
+        [b"namespace", b"{", _] => true,
+        [b"namespace", name, b"{"] => name.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_'),
+        _ => false,
+    })
+}
+
+/// The text of every leaf token outside comments and string or character
+/// literals, in source order.
+fn collect_code_leaves<'a>(node: Node, bytes: &'a [u8], out: &mut Vec<&'a [u8]>) {
+    if matches!(
+        node.kind(),
+        "comment" | "string_literal" | "char_literal" | "raw_string_literal" | "system_lib_string"
+    ) {
+        return;
+    }
+    if node.child_count() == 0 {
+        out.push(&bytes[node.start_byte()..node.end_byte()]);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_code_leaves(child, bytes, out);
+    }
+}
 
 fn check_implicit_int_functions(
     root: Node,
@@ -1869,6 +1907,33 @@ main(int c,char *C[]) {
             .expect("expected ImplicitIntFunction for 3+ implicit-int functions");
         assert_eq!(hit.severity, Severity::Warn);
         assert!(hit.message.contains("3"));
+    }
+
+    #[test]
+    fn cpp_headers_are_not_implicit_int() {
+        // Arrow's hashing.h, abridged: templates and member functions in a
+        // namespace, which C's grammar recovers as functions without types.
+        let src = b"#pragma once\nnamespace arrow {\nnamespace internal {\n\
+template <typename Scalar, template <class> class HashTableTemplateType = HashTable>\n\
+class ScalarMemoTable : public MemoTable {\n public:\n\
+  int64_t size() const override { return hash_table_.size(); }\n\
+  template <typename F1, typename F2>\n  Status GetOrInsert(const Scalar& value, F1&& a, F2&& b) { return Ok(); }\n\
+  template <typename F>\n  void VisitValues(F&& f) const { f(); }\n\
+};\n}  // namespace internal\n}  // namespace arrow\n";
+        let findings = run(src);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == SignalKind::ImplicitIntFunction),
+            "{:?}",
+            findings
+        );
+        // C++ words in a comment or a string don't hide K&R C.
+        let kr = b"/* template <class T> namespace x { */\nchar *s = \"namespace y {\";\n\
+Q(a){return a;}\nW(b){return b;}\nE(c){return c;}\n";
+        assert!(run(kr)
+            .iter()
+            .any(|f| f.kind == SignalKind::ImplicitIntFunction));
     }
 
     #[test]

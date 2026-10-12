@@ -12,7 +12,9 @@ use crate::ast;
 use crate::ast::FileFlags;
 use crate::diff;
 use crate::embedded;
-use crate::finding::{DiagnosticKind, FileAnalysis, ScanDiagnostic, ScanResult, Severity};
+use crate::finding::{
+    DiagnosticKind, FileAnalysis, Finding, ScanDiagnostic, ScanResult, Severity, SignalKind,
+};
 use crate::ignore::walk;
 use crate::language::Language;
 use crate::package_json;
@@ -140,6 +142,9 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
             }
         }
     }
+    for fa in analyses.iter_mut() {
+        collapse_escape_tables(&mut fa.findings);
+    }
     diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut findings_by_severity: HashMap<Severity, usize> = HashMap::new();
@@ -167,6 +172,63 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
         diagnostics,
         truncated,
     })
+}
+
+/// Rows this many lines apart or closer belong to the same table.
+const TABLE_ROW_GAP: usize = 3;
+/// Rows of escape runs that make a table, reported once.
+const TABLE_MIN_ROWS: usize = 4;
+
+/// Folds a table of escape runs into one finding: test vectors such as
+/// libsodium's `sign.c`, a row of random `\xNN` bytes per line, a thousand
+/// lines. Rows of the same kind and severity, each within
+/// [`TABLE_ROW_GAP`] lines of the last, at least [`TABLE_MIN_ROWS`] of them,
+/// become their first row's finding, its message giving the row count and
+/// line span. One payload still reports as before; a table still reports,
+/// once. Rows on lines added since the diff ref are left out of the fold
+/// and reported each on its own: a payload slipped into an existing table
+/// is new code. `findings` is in byte order.
+fn collapse_escape_tables(findings: &mut Vec<Finding>) {
+    let is_escape = |f: &Finding| {
+        matches!(
+            f.kind,
+            SignalKind::EncodingEscapeSoup | SignalKind::EncodingHex | SignalKind::EncodingOctal
+        ) && !f.diff_introduced
+    };
+    // Tables in progress, by (kind, severity): indices into `findings`.
+    let mut open: HashMap<(SignalKind, Severity), Vec<usize>> = HashMap::new();
+    let mut tables: Vec<Vec<usize>> = Vec::new();
+    for (i, f) in findings.iter().enumerate() {
+        if !is_escape(f) {
+            continue;
+        }
+        let rows = open.entry((f.kind, f.severity)).or_default();
+        if let Some(&last) = rows.last() {
+            if f.line > findings[last].line + TABLE_ROW_GAP {
+                tables.push(std::mem::take(rows));
+            }
+        }
+        rows.push(i);
+    }
+    tables.extend(open.into_values());
+    let mut drop = vec![false; findings.len()];
+    for rows in tables.iter().filter(|r| r.len() >= TABLE_MIN_ROWS) {
+        let (first, last) = (rows[0], rows[rows.len() - 1]);
+        let last_line = findings[last].line;
+        let f = &mut findings[first];
+        f.message = format!(
+            "{} rows of escape runs, lines {}-{} (first: {})",
+            rows.len(),
+            f.line,
+            last_line,
+            f.message
+        );
+        for &r in &rows[1..] {
+            drop[r] = true;
+        }
+    }
+    let mut keep = drop.iter().map(|d| !d);
+    findings.retain(|_| keep.next().unwrap_or(true));
 }
 
 fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>> {
@@ -472,4 +534,81 @@ fn is_doc_reference(bytes: &[u8], offset: usize) -> bool {
         .filter(|&&b| b == b'`')
         .count();
     backticks % 2 == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::finding::PassKind;
+
+    fn row(line: usize, kind: SignalKind, severity: Severity) -> Finding {
+        Finding {
+            path: PathBuf::from("sign.c"),
+            byte_offset: line * 100,
+            line,
+            col: 1,
+            pass: PassKind::Raw,
+            kind,
+            severity,
+            confidence: 0.8,
+            message: "81 consecutive `\\xNN` escapes (entropy 6.0 bits/byte)".into(),
+            snippet: String::new(),
+            diff_introduced: false,
+        }
+    }
+
+    #[test]
+    fn a_table_of_escape_runs_is_one_finding() {
+        let soup = SignalKind::EncodingEscapeSoup;
+        let mut findings: Vec<Finding> = (10..1010).map(|l| row(l, soup, Severity::Warn)).collect();
+        // A lone payload further down, and a long line among the rows.
+        findings.push(row(2000, soup, Severity::Warn));
+        findings.insert(5, row(15, SignalKind::LongLine, Severity::Info));
+        collapse_escape_tables(&mut findings);
+        let soups: Vec<&Finding> = findings.iter().filter(|f| f.kind == soup).collect();
+        assert_eq!(soups.len(), 2, "{:?}", soups);
+        assert_eq!(soups[0].line, 10);
+        assert!(soups[0]
+            .message
+            .starts_with("1000 rows of escape runs, lines 10-1009"));
+        assert_eq!(soups[0].severity, Severity::Warn);
+        assert_eq!(soups[1].line, 2000);
+        assert!(!soups[1].message.contains("rows"));
+        assert!(findings.iter().any(|f| f.kind == SignalKind::LongLine));
+    }
+
+    #[test]
+    fn few_or_scattered_escape_runs_are_kept() {
+        let soup = SignalKind::EncodingEscapeSoup;
+        let mut three: Vec<Finding> = (1..4).map(|l| row(l, soup, Severity::Warn)).collect();
+        collapse_escape_tables(&mut three);
+        assert_eq!(three.len(), 3);
+        let mut apart: Vec<Finding> = (0..6).map(|k| row(k * 10, soup, Severity::Warn)).collect();
+        collapse_escape_tables(&mut apart);
+        assert_eq!(apart.len(), 6);
+    }
+
+    #[test]
+    fn a_new_row_in_a_table_is_reported_on_its_own() {
+        let soup = SignalKind::EncodingEscapeSoup;
+        let mut findings: Vec<Finding> = (1..20).map(|l| row(l, soup, Severity::Warn)).collect();
+        findings[9].diff_introduced = true;
+        collapse_escape_tables(&mut findings);
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].message.starts_with("18 rows"));
+        assert!(findings[1].diff_introduced && findings[1].line == 10);
+        // Severities and kinds fold separately.
+        let mut mixed: Vec<Finding> = (1..9)
+            .map(|l| {
+                let s = if l % 2 == 0 {
+                    Severity::Info
+                } else {
+                    Severity::Warn
+                };
+                row(l, soup, s)
+            })
+            .collect();
+        collapse_escape_tables(&mut mixed);
+        assert_eq!(mixed.len(), 2);
+    }
 }

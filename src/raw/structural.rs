@@ -24,8 +24,17 @@ pub fn analyze_lang(
     lang: Option<Language>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    findings.extend(scan_long_lines(path, bytes, index));
-    findings.extend(scan_indent_whitespace(path, bytes, index));
+    let prose_file = matches!(
+        lang,
+        Some(Language::Markdown | Language::Rst | Language::Text)
+    );
+    findings.extend(scan_long_lines(path, bytes, index, prose_file));
+    let indents = scan_indent_whitespace(path, bytes, index);
+    if lang == Some(Language::Text) && !is_cmake(path) {
+        findings.extend(fold_text_indents(indents));
+    } else {
+        findings.extend(indents);
+    }
     match lang {
         None => findings.extend(scan_mixed_indent(path, bytes, index, false)),
         Some(l) if indentation_is_syntax(l) => {
@@ -82,7 +91,9 @@ const TABLE_SIMILAR: f32 = 0.8;
 const FILE_TYPICAL_SHARE: f32 = 0.5;
 const FILE_TYPICAL_FRACTION: f32 = 0.1;
 
-fn scan_long_lines(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
+/// `prose_file`: Markdown, reStructuredText or plain text, where a paragraph
+/// is often one line ([`is_prose`]).
+fn scan_long_lines(path: &Path, bytes: &[u8], index: &LineIndex, prose_file: bool) -> Vec<Finding> {
     let _ = index; // long-line location is always (line_num, 1), don't need the index
 
     // (start byte, length in characters) per line. Characters, not bytes:
@@ -109,7 +120,8 @@ fn scan_long_lines(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding>
             && len <= LONG_LINE_WARN
             && (in_layout_block(&lines, i)
                 || typical_for_file(&sorted, len)
-                || (in_declaration_run(&texts, i) && !has_whitespace_gap(texts[i])))
+                || (in_declaration_run(&texts, i) && !has_whitespace_gap(texts[i]))
+                || (prose_file && is_prose(texts[i])))
         {
             continue;
         }
@@ -139,6 +151,36 @@ fn in_declaration_run(texts: &[&[u8]], i: usize) -> bool {
         .filter(|&j| j != i && texts[j].get(..RUN_PREFIX) == Some(prefix))
         .count()
         >= TABLE_MIN_SIMILAR
+}
+
+/// Characters per space at most, and share of the other characters that
+/// are letters at least, for a line to read as prose: English runs about 6
+/// characters a word and 85% letters. Packed code has few spaces and much
+/// punctuation; an encoded blob has no spaces.
+const PROSE_CHARS_PER_SPACE: usize = 12;
+const PROSE_MIN_LETTERS: f32 = 0.7;
+
+/// True if `line` is a paragraph of words, as Markdown and
+/// reStructuredText keep one per line (eslint's docs): long, but nothing
+/// sits past the edge of the screen that its start doesn't show. A line
+/// with a [`WHITESPACE_GAP`] is not prose, however wordy.
+fn is_prose(line: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let (mut chars, mut spaces, mut letters) = (0usize, 0usize, 0usize);
+    for c in text.chars() {
+        chars += 1;
+        if c == ' ' {
+            spaces += 1;
+        } else if c.is_alphabetic() {
+            letters += 1;
+        }
+    }
+    spaces > 0
+        && spaces * PROSE_CHARS_PER_SPACE >= chars
+        && letters as f32 >= PROSE_MIN_LETTERS * (chars - spaces) as f32
+        && !has_whitespace_gap(line)
 }
 
 /// True if `line` has a run of [`WHITESPACE_GAP`] or more spaces or tabs
@@ -223,6 +265,46 @@ fn is_invisible_indent(c: char) -> bool {
     cp == 0x00A0 || (0x2000..=0x200A).contains(&cp) || cp == 0x202F || cp == 0x205F || cp == 0x3000
 }
 
+/// `CMakeLists.txt` is code with a text file's extension.
+fn is_cmake(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("CMakeLists.txt"))
+}
+
+/// Invisible indentation in a plain text file, as one info finding: nothing
+/// runs a `.txt` file, so its indentation hides no code. Pyright's output
+/// indents with NBSP, and ruff's benchmark snapshots of it held 98,608 such
+/// lines. The file is still named, with the count and characters.
+fn fold_text_indents(indents: Vec<Finding>) -> Option<Finding> {
+    let lines = indents.len();
+    let mut chars: Vec<String> = Vec::new();
+    for f in &indents {
+        let c = f
+            .message
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_default()
+            .to_string();
+        if !chars.contains(&c) {
+            chars.push(c);
+        }
+    }
+    let mut f = indents.into_iter().next()?;
+    f.severity = Severity::Info;
+    f.confidence = 0.40;
+    f.message = format!(
+        "{} line{} of text indented with invisible whitespace ({}), first at line {}",
+        lines,
+        if lines == 1 { "" } else { "s" },
+        chars.join(", "),
+        f.line
+    );
+    Some(f)
+}
+
+/// One finding per line whose indentation holds invisible whitespace, naming
+/// the first such character.
 fn scan_indent_whitespace(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<Finding> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Vec::new();
@@ -256,9 +338,8 @@ fn scan_indent_whitespace(path: &Path, bytes: &[u8], index: &LineIndex) -> Vec<F
                 snippet: redact_snippet(&snippet_around(bytes, byte_idx, 60)),
                 diff_introduced: false,
             });
-            // Keep scanning the rest of the indent of this line: another
-            // suspicious char could follow the first.
-            line_start = byte_idx + c.len_utf8();
+            // One per line: the rest of this indent adds nothing.
+            line_start = usize::MAX;
         } else {
             // First non-whitespace char: stop examining this line's indent.
             line_start = usize::MAX; // sentinel: nothing matches `byte_idx < line_start`
@@ -428,6 +509,43 @@ mod tests {
     }
 
     #[test]
+    fn invisible_indent_is_one_finding_per_line() {
+        let src = "x = (\n\u{00A0}\u{00A0}\u{3000}1,\n)\n".as_bytes();
+        let ws: Vec<Finding> = run(src)
+            .into_iter()
+            .filter(|f| f.kind == SignalKind::WhitespaceAnomaly)
+            .collect();
+        assert_eq!(ws.len(), 1, "{:?}", ws);
+        assert_eq!(ws[0].line, 2);
+        assert!(ws[0].message.contains("U+00A0"));
+    }
+
+    #[test]
+    fn invisible_indent_in_plain_text_is_one_info_per_file() {
+        // Pyright's output: continuation lines indented with NBSP.
+        let src = "file.py:1:1 - error: x\n    \u{00A0}\u{00A0}detail\nfile.py:2:1 - error: y\n    \u{00A0}\u{00A0}detail\n  \u{3000}z\n".as_bytes();
+        let idx = LineIndex::new(src);
+        let text = |name: &str| -> Vec<Finding> {
+            analyze_lang(&PathBuf::from(name), src, &idx, Some(Language::Text))
+                .into_iter()
+                .filter(|f| f.kind == SignalKind::WhitespaceAnomaly)
+                .collect()
+        };
+        let ws = text("black_Pyright.txt");
+        assert_eq!(ws.len(), 1, "{:?}", ws);
+        assert_eq!(ws[0].severity, Severity::Info);
+        assert_eq!(ws[0].line, 2);
+        assert_eq!(
+            ws[0].message,
+            "3 lines of text indented with invisible whitespace (U+00A0, U+3000), first at line 2"
+        );
+        // CMake is code: each line still warns.
+        let cmake = text("src/CMakeLists.txt");
+        assert_eq!(cmake.len(), 3);
+        assert!(cmake.iter().all(|f| f.severity == Severity::Warn));
+    }
+
+    #[test]
     fn flags_mixed_tab_space_indent() {
         let src = b"def f():\n\treturn 1\ndef g():\n    return 2\n";
         let findings = run(src);
@@ -505,7 +623,7 @@ mod tests {
     fn long_lines_count_characters_and_skip_table_rows() {
         let long = |src: String| {
             let idx = LineIndex::new(src.as_bytes());
-            scan_long_lines(Path::new("t.rst"), src.as_bytes(), &idx)
+            scan_long_lines(Path::new("t.rst"), src.as_bytes(), &idx, false)
                 .into_iter()
                 .map(|f| (f.line, f.message))
                 .collect::<Vec<_>>()
@@ -562,6 +680,51 @@ mod tests {
         // Over the warn threshold, a line is reported even among others.
         let big: String = (0..5).map(|_| format!("{}\n", "z".repeat(2100))).collect();
         assert_eq!(long(big).len(), 5);
+    }
+
+    #[test]
+    fn a_paragraph_on_one_line_is_not_long_in_prose_files() {
+        let para = "To provide suggestions, use the `suggest` key in the report argument with an array of suggestion objects. ".repeat(6);
+        let src = format!("# Title\n\n{}\n", para.trim_end());
+        let idx = LineIndex::new(src.as_bytes());
+        let long = |name: &str, lang: Language, src: &str| -> usize {
+            analyze_lang(&PathBuf::from(name), src.as_bytes(), &idx, Some(lang))
+                .iter()
+                .filter(|f| f.kind == SignalKind::LongLine)
+                .count()
+        };
+        assert_eq!(long("custom-rules.md", Language::Markdown, &src), 0);
+        assert_eq!(long("custom-rules.rst", Language::Rst, &src), 0);
+        // Code is still measured, prose or not.
+        assert_eq!(long("x.js", Language::JavaScript, &src), 1);
+        // Text pushed off-screen by a gap, and packed code, still are.
+        let hidden = format!(
+            "See the docs.{}require('child_process').exec(x)\n",
+            " ".repeat(600)
+        );
+        let idx2 = LineIndex::new(hidden.as_bytes());
+        let n = analyze_lang(
+            &PathBuf::from("README.md"),
+            hidden.as_bytes(),
+            &idx2,
+            Some(Language::Markdown),
+        )
+        .iter()
+        .filter(|f| f.kind == SignalKind::LongLine)
+        .count();
+        assert_eq!(n, 1);
+        let packed = format!("{}\n", "var a=b(c,d);if(e){f[g]=h(i,j)}".repeat(20));
+        let idx3 = LineIndex::new(packed.as_bytes());
+        let n = analyze_lang(
+            &PathBuf::from("README.md"),
+            packed.as_bytes(),
+            &idx3,
+            Some(Language::Markdown),
+        )
+        .iter()
+        .filter(|f| f.kind == SignalKind::LongLine)
+        .count();
+        assert_eq!(n, 1);
     }
 
     #[test]

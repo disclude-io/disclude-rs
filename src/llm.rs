@@ -274,21 +274,65 @@ pub fn build_prompt(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> S
     out
 }
 
+/// The JSON schema of a review: Anthropic's structured outputs hold the
+/// model to it. Asked for JSON in the prompt alone, Claude Haiku 5.5 now and
+/// then answers in Markdown instead (seen reviewing dotenv's README), which
+/// leaves no verdicts.
+fn verdicts_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["confirmed", "suspicious", "inconclusive", "likely_benign", "dismissed"]
+                        },
+                        "confidence": {"type": "number"},
+                        "summary": {"type": "string"},
+                        "reasoning": {"type": "string"}
+                    },
+                    "required": ["id", "verdict", "confidence", "summary", "reasoning"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["verdicts"],
+        "additionalProperties": false
+    })
+}
+
 pub fn call_anthropic(system: &str, user: &str, config: &LLMConfig) -> anyhow::Result<String> {
     let url = format!("{}/v1/messages", config.base_url);
-    let body = json!({
+    let mut body = json!({
         "model": config.model,
         "max_tokens": ANTHROPIC_MAX_TOKENS,
         "system": system,
-        "messages": [{"role": "user", "content": user}]
+        "messages": [{"role": "user", "content": user}],
+        "output_config": {"format": {"type": "json_schema", "schema": verdicts_schema()}}
     });
 
-    let resp = ureq::post(&url)
-        .header("x-api-key", &config.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .send_json(&body)
-        .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {}", e))?;
+    let send = |body: &Value| {
+        ureq::post(&url)
+            .header("x-api-key", &config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .send_json(body)
+    };
+    // A model without structured outputs rejects the request (400): ask
+    // again without it, relying on the prompt as before.
+    let resp = match send(&body) {
+        Err(ureq::Error::StatusCode(400)) => {
+            body.as_object_mut().map(|b| b.remove("output_config"));
+            send(&body)
+        }
+        other => other,
+    }
+    .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {}", e))?;
 
     let text = resp
         .into_body()
@@ -359,7 +403,10 @@ pub fn parse_response(
     let parsed: Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("disclude: llm response parse error: {e}");
+            // Show the start of what came back: a refusal or prose with no
+            // JSON object otherwise leaves nothing to go on.
+            let start: String = raw.trim().chars().take(300).collect();
+            eprintln!("disclude: llm response parse error: {e}; response began: {start:?}");
             return Vec::new();
         }
     };
@@ -421,6 +468,33 @@ fn parse_verdict(item: &Value) -> LLMVerdict {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn verdicts_schema_is_strict() {
+        // Structured outputs need every property listed in `required` and
+        // `additionalProperties: false`, at each object level.
+        let schema = verdicts_schema();
+        let item = &schema["properties"]["verdicts"]["items"];
+        for obj in [&schema, item] {
+            let props: Vec<&String> = obj["properties"].as_object().unwrap().keys().collect();
+            let required: Vec<&str> = obj["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+            assert_eq!(props.len(), required.len());
+            assert!(props.iter().all(|p| required.contains(&p.as_str())));
+            assert_eq!(obj["additionalProperties"], false);
+        }
+        // The verdict values are the ones parse_verdict reads.
+        let values = item["properties"]["verdict"]["enum"].as_array().unwrap();
+        for v in values {
+            let parsed = parse_verdict(&json!({"verdict": v}));
+            assert_eq!(serde_json::to_value(parsed.verdict).unwrap(), *v, "{v}");
+        }
+    }
+
     use super::*;
 
     #[test]
