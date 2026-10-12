@@ -336,6 +336,10 @@ AST pass; language-specific.
 
 ## What is New
 
+### 3.7.0
+
+Improvements to heuristic signal detections.
+
 ### 3.6.0
 
 Identification of protobuf descriptors in generated Python code.
