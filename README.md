@@ -88,6 +88,8 @@ disclude scan ./my-package --llm --llm-provider anthropic --llm-model claude-son
 
 The optional `--llm` flag adds a fourth analysis step after the three static passes. WARN and CRITICAL findings are batched (up to ~6 KB of context per request) and sent to an LLM, which enriches findings with verdict and confidence for each finding.
 
+The instructions are the same in every request and are sent as a cached system prompt (Anthropic prompt caching), so each batch after the first pays full price only for its own findings. A verdict that answers nothing (an unknown id, a confidence of zero or out of range, an empty or placeholder summary) is skipped, and its finding keeps its severity with no verdict.
+
 ### Provider setup
 
 The provider is auto-detected from environment variables in priority order:

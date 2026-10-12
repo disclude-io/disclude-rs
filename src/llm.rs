@@ -104,6 +104,27 @@ pub fn finding_id(root: &Path, f: &Finding) -> String {
     format!("{}:{}:{}", rel.display(), f.line, f.col)
 }
 
+/// The id of each finding in a batch, as the prompt shows it and the model
+/// answers with: `finding_id`, made unique. Findings of different kinds can
+/// share a location (a line both long and high in entropy); the second and
+/// later ones get `#2`, `#3`, and so on, or their verdicts would collide.
+pub fn batch_ids(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    batch
+        .iter()
+        .map(|(_key, f, _lang)| {
+            let id = finding_id(root, f);
+            let n = seen.entry(id.clone()).or_insert(0);
+            *n += 1;
+            if *n == 1 {
+                id
+            } else {
+                format!("{id}#{n}")
+            }
+        })
+        .collect()
+}
+
 pub fn detect_provider(
     llm_provider: Option<&str>,
     llm_model: Option<&str>,
@@ -152,25 +173,46 @@ pub fn detect_provider(
     })
 }
 
+/// Instructions shared by every batch. They are sent as the system prompt,
+/// marked for prompt caching: identical in every request of a scan (and
+/// across scans), they are read from the cache after the first request. Only
+/// the findings, in the user message, change from batch to batch.
+const SYSTEM_PROMPT: &str = "\
+You are a security expert reviewing findings from disclude, a code obfuscation and supply-chain attack scanner. \
+disclude runs three analysis passes: (1) raw: byte-level patterns such as unicode anomalies, encoded blobs, and high-entropy strings; \
+(2) token: identifier and string-construction patterns such as concatenated sensitive names or macro redefinitions; \
+(3) ast: semantic patterns such as dynamic execution, shell calls, and encoded dropper pipelines. \
+Raw findings have a higher false-positive rate than AST findings.
+
+Each message lists findings, each headed `Finding <id>` and followed by its file, language, severity, pass, signal, message and snippet. \
+For each finding, determine whether it represents genuine obfuscation or malicious intent versus a legitimate coding pattern. \
+Consider the pass type, signal, snippet, and file context.
+
+Give exactly one verdict per finding, using its id exactly as written. Respond ONLY with valid JSON:
+{\"verdicts\": [{\"id\": \"<id>\", \"verdict\": \"confirmed|suspicious|inconclusive|likely_benign|dismissed\", \
+\"confidence\": <0.0-1.0>, \"summary\": \"<one sentence>\", \"reasoning\": \"<explanation>\"}]}";
+
 pub fn review_scan(result: &ScanResult, config: &LLMConfig) -> anyhow::Result<LLMReview> {
     let batches = build_batches(result);
     if batches.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let system = "You are a security expert reviewing findings from disclude, a code obfuscation and supply-chain attack scanner. disclude runs three analysis passes: (1) raw: byte-level patterns such as unicode anomalies, encoded blobs, and high-entropy strings; (2) token: identifier and string-construction patterns such as concatenated sensitive names or macro redefinitions; (3) ast: semantic patterns such as dynamic execution, shell calls, and encoded dropper pipelines. Raw findings have a higher false-positive rate than AST findings. For each finding you receive, determine whether it represents genuine obfuscation or malicious intent versus a legitimate coding pattern. Consider the pass type, signal, snippet, and file context.";
-
     let mut review: LLMReview = HashMap::new();
     for batch in &batches {
-        let id_map: HashMap<String, FindingKey> = batch
+        let ids = batch_ids(&result.root, batch);
+        let id_map: HashMap<String, FindingKey> = ids
             .iter()
-            .map(|(key, f, _lang)| (finding_id(&result.root, f), key.clone()))
+            .zip(batch)
+            .map(|(id, (key, _f, _lang))| (id.clone(), key.clone()))
             .collect();
 
         let user = build_prompt(&result.root, batch);
         let raw = match &config.provider {
-            LLMProvider::Anthropic => call_anthropic(system, &user, config)?,
-            LLMProvider::OpenAI | LLMProvider::Ollama => call_openai_compat(system, &user, config)?,
+            LLMProvider::Anthropic => call_anthropic(SYSTEM_PROMPT, &user, config)?,
+            LLMProvider::OpenAI | LLMProvider::Ollama => {
+                call_openai_compat(SYSTEM_PROMPT, &user, config)?
+            }
         };
 
         for (key, verdict) in parse_response(&raw, &id_map) {
@@ -234,14 +276,13 @@ pub fn build_batches(result: &ScanResult) -> Vec<Vec<(FindingKey, Finding, Langu
     batches
 }
 
+/// The user message for a batch: the findings alone. The instructions and
+/// answer format are in `SYSTEM_PROMPT`.
 pub fn build_prompt(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> String {
     let n = batch.len();
-    let mut out = format!(
-        "Analyze the following {n} findings from a disclude static-analysis security scan.\n For each finding, determine whether it represents a genuine code obfuscation security concern or a false positive.\n\n"
-    );
+    let mut out = format!("Review these {n} findings.\n\n");
 
-    for (_key, f, lang) in batch {
-        let id = finding_id(root, f);
+    for (id, (_key, f, lang)) in batch_ids(root, batch).iter().zip(batch) {
         let rel = f.path.strip_prefix(root).unwrap_or(&f.path);
         let pass = match f.pass {
             crate::finding::PassKind::Raw => "raw",
@@ -259,18 +300,6 @@ pub fn build_prompt(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> S
             f.snippet
         ));
     }
-
-    out.push_str(concat!(
-        "Respond ONLY with valid JSON:\n",
-        "{\n  \"verdicts\": [\n    {\n",
-        "      \"id\": \"<relative_path:line:col>\",\n",
-        "      \"verdict\": \"confirmed|suspicious|inconclusive|likely_benign|dismissed\",\n",
-        "      \"score\": 0-4,\n",
-        "      \"confidence\": 0.0-1.0,\n",
-        "      \"summary\": \"one sentence\",\n",
-        "      \"reasoning\": \"explanation\"\n",
-        "    }\n  ]\n}",
-    ));
     out
 }
 
@@ -287,14 +316,26 @@ fn verdicts_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string"},
+                        "id": {
+                            "type": "string",
+                            "description": "The finding's id, exactly as after `Finding` in the message"
+                        },
                         "verdict": {
                             "type": "string",
                             "enum": ["confirmed", "suspicious", "inconclusive", "likely_benign", "dismissed"]
                         },
-                        "confidence": {"type": "number"},
-                        "summary": {"type": "string"},
-                        "reasoning": {"type": "string"}
+                        "confidence": {
+                            "type": "number",
+                            "description": "How sure the verdict is, from 0.0 (a guess) to 1.0 (certain)"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "One sentence on what the flagged code is"
+                        },
+                        "reasoning": {
+                            "type": "string",
+                            "description": "Why the verdict follows from the snippet and its context"
+                        }
                     },
                     "required": ["id", "verdict", "confidence", "summary", "reasoning"],
                     "additionalProperties": false
@@ -311,7 +352,7 @@ pub fn call_anthropic(system: &str, user: &str, config: &LLMConfig) -> anyhow::R
     let mut body = json!({
         "model": config.model,
         "max_tokens": ANTHROPIC_MAX_TOKENS,
-        "system": system,
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         "messages": [{"role": "user", "content": user}],
         "output_config": {"format": {"type": "json_schema", "schema": verdicts_schema()}}
     });
@@ -420,18 +461,38 @@ pub fn parse_response(
     };
 
     let mut out = Vec::new();
+    let (mut unknown, mut degenerate) = (0, 0);
     for item in arr {
-        let id = match item["id"].as_str() {
-            Some(s) => s,
-            None => continue,
+        let Some(key) = item["id"].as_str().and_then(|id| id_map.get(id.trim())) else {
+            unknown += 1;
+            continue;
         };
-        let key = match id_map.get(id) {
-            Some(k) => k.clone(),
-            None => continue,
-        };
-        out.push((key, parse_verdict(item)));
+        if is_degenerate(item) {
+            degenerate += 1;
+            continue;
+        }
+        out.push((key.clone(), parse_verdict(item)));
+    }
+    if unknown + degenerate > 0 {
+        eprintln!(
+            "disclude: llm response: {unknown} verdict(s) with unknown ids and {degenerate} without substance skipped"
+        );
     }
     out
+}
+
+/// A verdict that fills the schema without answering: confidence missing,
+/// zero or out of range, or no summary (Claude Haiku 5.5 now and then
+/// returns `0.0` and an empty or "placeholder" summary). Taking it would
+/// record a non-answer, or demote nothing while looking reviewed; skipping
+/// it leaves the finding without a verdict, which callers can ask about
+/// again.
+fn is_degenerate(item: &Value) -> bool {
+    let confidence = item["confidence"].as_f64().unwrap_or(f64::NAN);
+    let summary = item["summary"].as_str().unwrap_or("").trim();
+    !(confidence > 0.0 && confidence <= 1.0)
+        || summary.is_empty()
+        || summary.eq_ignore_ascii_case("placeholder")
 }
 
 fn extract_json(s: &str) -> &str {
@@ -540,6 +601,109 @@ mod tests {
             "content": [{"type": "text", "text": "{\"verdicts\": [{"}]
         });
         assert!(anthropic_response_text(&cut).is_err());
+    }
+
+    fn finding(line: usize, kind: SignalKind) -> (FindingKey, Finding, Language) {
+        let f = Finding {
+            path: PathBuf::from("/repo/src/a.py"),
+            byte_offset: 0,
+            line,
+            col: 1,
+            pass: crate::finding::PassKind::Raw,
+            kind,
+            severity: Severity::Warn,
+            confidence: 0.8,
+            message: "m".into(),
+            snippet: "s".into(),
+            diff_introduced: false,
+        };
+        (finding_key(&f), f, Language::Python)
+    }
+
+    #[test]
+    fn findings_at_one_location_get_distinct_ids() {
+        let batch = [
+            finding(3, SignalKind::LongLine),
+            finding(3, SignalKind::EncodingHex),
+            finding(4, SignalKind::LongLine),
+            finding(3, SignalKind::UnicodeBidi),
+        ];
+        let root = Path::new("/repo");
+        assert_eq!(
+            batch_ids(root, &batch),
+            [
+                "src/a.py:3:1",
+                "src/a.py:3:1#2",
+                "src/a.py:4:1",
+                "src/a.py:3:1#3"
+            ]
+        );
+        // The prompt shows the same ids.
+        let prompt = build_prompt(root, &batch);
+        let shown: Vec<&str> = prompt
+            .lines()
+            .filter_map(|l| l.strip_prefix("Finding "))
+            .collect();
+        assert_eq!(shown, batch_ids(root, &batch));
+        // The instructions are in the system prompt, not repeated per batch.
+        assert!(!prompt.contains("Respond ONLY"));
+        assert!(SYSTEM_PROMPT.contains("Respond ONLY with valid JSON"));
+        assert!(!SYSTEM_PROMPT.contains("score"), "the schema has no score");
+    }
+
+    #[test]
+    fn each_colliding_finding_gets_its_own_verdict() {
+        let batch = [
+            finding(3, SignalKind::LongLine),
+            finding(3, SignalKind::EncodingHex),
+        ];
+        let ids = batch_ids(Path::new("/repo"), &batch);
+        let id_map: HashMap<String, FindingKey> = ids
+            .iter()
+            .zip(&batch)
+            .map(|(id, (key, _, _))| (id.clone(), key.clone()))
+            .collect();
+        let raw = json!({"verdicts": [
+            {"id": "src/a.py:3:1", "verdict": "dismissed", "confidence": 0.9,
+             "summary": "a long line", "reasoning": "r"},
+            {"id": "src/a.py:3:1#2", "verdict": "suspicious", "confidence": 0.8,
+             "summary": "hex", "reasoning": "r"}
+        ]})
+        .to_string();
+        let got: HashMap<FindingKey, Verdict> = parse_response(&raw, &id_map)
+            .into_iter()
+            .map(|(k, v)| (k, v.verdict))
+            .collect();
+        assert_eq!(got[&batch[0].0], Verdict::Dismissed);
+        assert_eq!(got[&batch[1].0], Verdict::Suspicious);
+    }
+
+    #[test]
+    fn verdicts_without_substance_are_skipped() {
+        let (key, _, _) = finding(3, SignalKind::LongLine);
+        let id_map = HashMap::from([("src/a.py:3:1".to_string(), key)]);
+        let one = |v: Value| parse_response(&json!({ "verdicts": [v] }).to_string(), &id_map);
+        let good = json!({"id": "src/a.py:3:1", "verdict": "likely_benign", "confidence": 0.8,
+                          "summary": "a minified bundle", "reasoning": "r"});
+        assert_eq!(one(good.clone()).len(), 1);
+        for (field, bad) in [
+            ("confidence", json!(0.0)),
+            ("confidence", json!(1.5)),
+            ("confidence", Value::Null),
+            ("summary", json!("")),
+            ("summary", json!(" Placeholder ")),
+        ] {
+            let mut v = good.clone();
+            v[field] = bad.clone();
+            assert!(one(v).is_empty(), "{field}: {bad}");
+        }
+        // Unknown ids are skipped too; a stray space around a known one is not.
+        let mut v = good.clone();
+        v["id"] = json!("src/a.py:3:2");
+        assert!(one(v).is_empty());
+        let mut v = good;
+        v["id"] = json!(" src/a.py:3:1");
+        assert_eq!(one(v).len(), 1);
     }
 
     #[test]
