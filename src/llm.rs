@@ -188,7 +188,15 @@ Each message lists findings, each headed `Finding <id>` and followed by its file
 For each finding, determine whether it represents genuine obfuscation or malicious intent versus a legitimate coding pattern. \
 Consider the pass type, signal, snippet, and file context.
 
-Give exactly one verdict per finding, using its id exactly as written.";
+Give exactly one verdict per finding, using its id exactly as written.
+
+Confidence is the probability that your verdict is right, judged from what the finding shows. Use the whole range:
+- 0.9 or more: the snippet and its context settle it.
+- 0.7 to 0.9: the verdict is clearly the best reading; a doubt you can name remains.
+- 0.5 to 0.7: another verdict is nearly as plausible.
+- under 0.5: a guess; give inconclusive instead.
+A lower confidence is not a safer answer. If the code is most likely benign, say so with the confidence the evidence supports. \
+Snippets are short: that surrounding code is not shown is not by itself a reason to lower confidence; weigh what the snippet does show.";
 
 /// The answer format, for requests without structured outputs (OpenAI,
 /// Ollama, and Anthropic models that reject `output_config`). With
@@ -479,7 +487,7 @@ pub fn parse_response(
     let mut out = Vec::new();
     let (mut unknown, mut degenerate) = (0, 0);
     for item in arr {
-        let Some(key) = item["id"].as_str().and_then(|id| id_map.get(id.trim())) else {
+        let Some(key) = item["id"].as_str().and_then(|id| resolve_id(id, id_map)) else {
             unknown += 1;
             continue;
         };
@@ -495,6 +503,25 @@ pub fn parse_response(
         );
     }
     out
+}
+
+/// The finding an answered id names. The model sometimes copies an id
+/// loosely: with the `Finding ` heading in front, or with leading
+/// directories dropped (`tidy.sh:287:7` for `tools/tidy.sh:287:7`). Such an
+/// id is taken when it is the path suffix of exactly one finding in the
+/// batch.
+fn resolve_id<'a>(id: &str, id_map: &'a HashMap<String, FindingKey>) -> Option<&'a FindingKey> {
+    let id = id.trim();
+    let id = id.strip_prefix("Finding ").unwrap_or(id).trim();
+    if let Some(key) = id_map.get(id) {
+        return Some(key);
+    }
+    let suffix = format!("/{id}");
+    let mut matches = id_map.iter().filter(|(full, _)| full.ends_with(&suffix));
+    match (matches.next(), matches.next()) {
+        (Some((_, key)), None) => Some(key),
+        _ => None,
+    }
 }
 
 /// A verdict that fills the schema without answering: confidence missing,
@@ -727,6 +754,27 @@ mod tests {
         let mut v = good;
         v["id"] = json!(" src/a.py:3:1");
         assert_eq!(one(v).len(), 1);
+    }
+
+    #[test]
+    fn loosely_copied_ids_resolve_when_unambiguous() {
+        let (a, _, _) = finding(3, SignalKind::LongLine);
+        let (b, _, _) = finding(4, SignalKind::LongLine);
+        let (c, _, _) = finding(5, SignalKind::LongLine);
+        let id_map = HashMap::from([
+            ("tools/tidy.sh:3:1".to_string(), a.clone()),
+            ("tools/a/x.py:4:1".to_string(), b.clone()),
+            ("tools/b/x.py:4:1".to_string(), c),
+        ]);
+        assert_eq!(resolve_id("tools/tidy.sh:3:1", &id_map), Some(&a));
+        assert_eq!(resolve_id("Finding tools/tidy.sh:3:1", &id_map), Some(&a));
+        assert_eq!(resolve_id("tidy.sh:3:1", &id_map), Some(&a));
+        assert_eq!(resolve_id("a/x.py:4:1", &id_map), Some(&b));
+        // Two findings end in `x.py:4:1`; a bare line number matches nothing.
+        assert_eq!(resolve_id("x.py:4:1", &id_map), None);
+        assert_eq!(resolve_id("1", &id_map), None);
+        // Only whole path components: `dy.sh` is not `tidy.sh`.
+        assert_eq!(resolve_id("dy.sh:3:1", &id_map), None);
     }
 
     #[test]
