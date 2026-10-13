@@ -188,9 +188,24 @@ Each message lists findings, each headed `Finding <id>` and followed by its file
 For each finding, determine whether it represents genuine obfuscation or malicious intent versus a legitimate coding pattern. \
 Consider the pass type, signal, snippet, and file context.
 
-Give exactly one verdict per finding, using its id exactly as written. Respond ONLY with valid JSON:
+Give exactly one verdict per finding, using its id exactly as written.";
+
+/// The answer format, for requests without structured outputs (OpenAI,
+/// Ollama, and Anthropic models that reject `output_config`). With
+/// structured outputs it is left out: the schema states it, and with this
+/// template also in the system prompt Claude Haiku 5.5 answered about one
+/// batch in five with a single verdict copied from it (id, summary and
+/// reasoning "placeholder", confidence 0), against about one in eighty
+/// without.
+const ANSWER_FORMAT: &str = "\
+Respond ONLY with valid JSON:
 {\"verdicts\": [{\"id\": \"<id>\", \"verdict\": \"confirmed|suspicious|inconclusive|likely_benign|dismissed\", \
 \"confidence\": <0.0-1.0>, \"summary\": \"<one sentence>\", \"reasoning\": \"<explanation>\"}]}";
+
+/// `SYSTEM_PROMPT` with `ANSWER_FORMAT` after it.
+fn system_with_format(system: &str) -> String {
+    format!("{system}\n\n{ANSWER_FORMAT}")
+}
 
 pub fn review_scan(result: &ScanResult, config: &LLMConfig) -> anyhow::Result<LLMReview> {
     let batches = build_batches(result);
@@ -276,8 +291,8 @@ pub fn build_batches(result: &ScanResult) -> Vec<Vec<(FindingKey, Finding, Langu
     batches
 }
 
-/// The user message for a batch: the findings alone. The instructions and
-/// answer format are in `SYSTEM_PROMPT`.
+/// The user message for a batch: the findings alone. The instructions are in
+/// `SYSTEM_PROMPT`.
 pub fn build_prompt(root: &Path, batch: &[(FindingKey, Finding, Language)]) -> String {
     let n = batch.len();
     let mut out = format!("Review these {n} findings.\n\n");
@@ -365,10 +380,11 @@ pub fn call_anthropic(system: &str, user: &str, config: &LLMConfig) -> anyhow::R
             .send_json(body)
     };
     // A model without structured outputs rejects the request (400): ask
-    // again without it, relying on the prompt as before.
+    // again without it, with the answer format in the prompt instead.
     let resp = match send(&body) {
         Err(ureq::Error::StatusCode(400)) => {
             body.as_object_mut().map(|b| b.remove("output_config"));
+            body["system"][0]["text"] = json!(system_with_format(system));
             send(&body)
         }
         other => other,
@@ -412,7 +428,7 @@ pub fn call_openai_compat(system: &str, user: &str, config: &LLMConfig) -> anyho
     let body = json!({
         "model": config.model,
         "messages": [
-            {"role": "system", "content": system},
+            {"role": "system", "content": system_with_format(system)},
             {"role": "user", "content": user}
         ]
     });
@@ -647,8 +663,15 @@ mod tests {
         assert_eq!(shown, batch_ids(root, &batch));
         // The instructions are in the system prompt, not repeated per batch.
         assert!(!prompt.contains("Respond ONLY"));
-        assert!(SYSTEM_PROMPT.contains("Respond ONLY with valid JSON"));
-        assert!(!SYSTEM_PROMPT.contains("score"), "the schema has no score");
+        // With structured outputs the schema alone gives the format: no
+        // template to copy from.
+        assert!(
+            !SYSTEM_PROMPT.contains("Respond ONLY") && !SYSTEM_PROMPT.contains("{\"verdicts\"")
+        );
+        let unstructured = system_with_format(SYSTEM_PROMPT);
+        assert!(unstructured.starts_with(SYSTEM_PROMPT));
+        assert!(unstructured.contains("Respond ONLY with valid JSON"));
+        assert!(!unstructured.contains("score"), "the schema has no score");
     }
 
     #[test]

@@ -338,6 +338,10 @@ AST pass; language-specific.
 
 ## What is New
 
+### 3.8.1
+
+Corrected issue in LLM prompts and caching.
+
 ### 3.8.0
 
 Improvements to LLM prompts and caching.
