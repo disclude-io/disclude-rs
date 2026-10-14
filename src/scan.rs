@@ -179,9 +179,10 @@ const TABLE_ROW_GAP: usize = 3;
 /// Rows of escape runs that make a table, reported once.
 const TABLE_MIN_ROWS: usize = 4;
 
-/// Folds a table of escape runs into one finding: test vectors such as
-/// libsodium's `sign.c`, a row of random `\xNN` bytes per line, a thousand
-/// lines. Rows of the same kind and severity, each within
+/// Folds a table of escape runs or base64 lines into one finding: test
+/// vectors such as libsodium's `sign.c`, a row of random `\xNN` bytes per
+/// line, a thousand lines; or a PEM certificate written one string literal
+/// per line (`"MIIC...\n"`, gRPC's TLS tests). Rows of the same kind and severity, each within
 /// [`TABLE_ROW_GAP`] lines of the last, at least [`TABLE_MIN_ROWS`] of them,
 /// become their first row's finding, its message giving the row count and
 /// line span. One payload still reports as before; a table still reports,
@@ -192,7 +193,10 @@ fn collapse_escape_tables(findings: &mut Vec<Finding>) {
     let is_escape = |f: &Finding| {
         matches!(
             f.kind,
-            SignalKind::EncodingEscapeSoup | SignalKind::EncodingHex | SignalKind::EncodingOctal
+            SignalKind::EncodingEscapeSoup
+                | SignalKind::EncodingHex
+                | SignalKind::EncodingOctal
+                | SignalKind::EncodingBase64
         ) && !f.diff_introduced
     };
     // Tables in progress, by (kind, severity): indices into `findings`.
@@ -216,8 +220,12 @@ fn collapse_escape_tables(findings: &mut Vec<Finding>) {
         let (first, last) = (rows[0], rows[rows.len() - 1]);
         let last_line = findings[last].line;
         let f = &mut findings[first];
+        let rows_of = match f.kind {
+            SignalKind::EncodingBase64 => "base64-like lines",
+            _ => "escape runs",
+        };
         f.message = format!(
-            "{} rows of escape runs, lines {}-{} (first: {})",
+            "{} rows of {rows_of}, lines {}-{} (first: {})",
             rows.len(),
             f.line,
             last_line,
@@ -575,6 +583,18 @@ mod tests {
         assert_eq!(soups[1].line, 2000);
         assert!(!soups[1].message.contains("rows"));
         assert!(findings.iter().any(|f| f.kind == SignalKind::LongLine));
+    }
+
+    #[test]
+    fn a_pem_written_one_literal_per_line_is_one_finding() {
+        let b64 = SignalKind::EncodingBase64;
+        let mut findings: Vec<Finding> = (80..100).map(|l| row(l, b64, Severity::Warn)).collect();
+        collapse_escape_tables(&mut findings);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0]
+            .message
+            .starts_with("20 rows of base64-like lines, lines 80-99"));
+        assert_eq!(findings[0].severity, Severity::Warn);
     }
 
     #[test]

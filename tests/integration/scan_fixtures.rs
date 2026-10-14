@@ -3,7 +3,8 @@
 
 use std::path::PathBuf;
 
-use disclude::finding::SignalKind;
+use disclude::finding::{Severity, SignalKind};
+use disclude::language::Language;
 use disclude::scan::{scan, ScanOptions};
 
 fn fixture_root() -> PathBuf {
@@ -2342,4 +2343,41 @@ fn scan_result_serde_round_trip_and_schema() {
             "snippet",
         ]
     );
+}
+
+#[test]
+fn cpp_fixtures_are_scanned_as_cpp() {
+    let r = run();
+    let lang = |name: &str| {
+        r.files
+            .iter()
+            .find(|fa| fa.path.to_string_lossy().ends_with(name))
+            .map(|fa| fa.language)
+    };
+    assert_eq!(lang("cpp/clean.cpp"), Some(Language::Cpp));
+    assert_eq!(lang("cpp/widget.h"), Some(Language::Cpp));
+    assert_eq!(lang("c/clean.c"), Some(Language::C));
+    let clean = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("cpp/clean.cpp"))
+        .unwrap();
+    assert!(clean.findings.is_empty(), "{:?}", clean.findings);
+}
+
+#[test]
+fn cpp_shellout_fixture_emits_dynamic_execution_critical() {
+    let r = run();
+    let fa = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("cpp/shellout.cpp"))
+        .expect("shellout.cpp scanned");
+    let lines: Vec<usize> = fa
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Critical)
+        .map(|f| f.line)
+        .collect();
+    assert_eq!(lines, [10, 13, 15], "std::system, ::popen, execv");
 }

@@ -18,6 +18,7 @@ use crate::util::{snippet_around, LineIndex};
 
 pub mod bash;
 pub mod c;
+pub use c::looks_like_cpp;
 pub mod python;
 pub mod rust;
 pub mod typescript;
@@ -92,6 +93,7 @@ fn tokenize(bytes: &[u8], lang: Language) -> Vec<Token> {
     match lang {
         Language::Bash => bash::tokenize(bytes),
         Language::C => c::tokenize(bytes),
+        Language::Cpp => c::tokenize_cpp(bytes),
         Language::Python => python::tokenize(bytes),
         Language::Rust => rust::tokenize(bytes),
         Language::TypeScript | Language::JavaScript => typescript::tokenize(bytes),
@@ -262,7 +264,7 @@ fn is_conventional_short(ident: &str, lang: Language) -> bool {
     }
     match lang {
         Language::Bash => false,
-        Language::C => false,
+        Language::C | Language::Cpp => false,
         Language::Python => ident.starts_with("__") && ident.ends_with("__"),
         Language::Rust => ident.starts_with('_'),
         Language::TypeScript | Language::JavaScript => ident.starts_with('$'),
@@ -469,7 +471,7 @@ fn emit_identifier_collision_findings(
     lang: Language,
     tokens: &[Token],
 ) -> Vec<Finding> {
-    if !matches!(lang, Language::C) {
+    if !matches!(lang, Language::C | Language::Cpp) {
         return Vec::new();
     }
     use std::collections::HashMap;
@@ -841,7 +843,7 @@ fn emit_macro_alias_findings(
     lang: Language,
     tokens: &[Token],
 ) -> Vec<Finding> {
-    if !matches!(lang, Language::C) {
+    if !matches!(lang, Language::C | Language::Cpp) {
         return Vec::new();
     }
     let mut findings = Vec::new();
@@ -975,7 +977,7 @@ fn emit_macro_keyword_override_findings(
     lang: Language,
     tokens: &[Token],
 ) -> Vec<Finding> {
-    if !matches!(lang, Language::C) {
+    if !matches!(lang, Language::C | Language::Cpp) {
         return Vec::new();
     }
     let mut findings = Vec::new();
@@ -1083,7 +1085,7 @@ fn emit_embedded_nul_findings(
     lang: Language,
     tokens: &[Token],
 ) -> Vec<Finding> {
-    if !matches!(lang, Language::C) {
+    if !matches!(lang, Language::C | Language::Cpp) {
         return Vec::new();
     }
     let mut findings = Vec::new();
@@ -1220,7 +1222,7 @@ fn emit_format_string_write_findings(
     lang: Language,
     tokens: &[Token],
 ) -> Vec<Finding> {
-    if !matches!(lang, Language::C) {
+    if !matches!(lang, Language::C | Language::Cpp) {
         return Vec::new();
     }
     let mut findings = Vec::new();
@@ -1338,7 +1340,7 @@ fn scan_format_n_directives(text: &[u8]) -> Vec<(usize, String)> {
         }
         if text[i] == b'%' {
             if let Some((dir_len, is_n)) = parse_printf_directive(&text[i..]) {
-                if is_n {
+                if is_n && !is_word_start(&text[i..i + dir_len], text.get(i + dir_len)) {
                     let dir = std::str::from_utf8(&text[i..i + dir_len])
                         .unwrap_or("?")
                         .to_string();
@@ -1366,6 +1368,15 @@ fn scan_format_n_directives(text: &[u8]) -> Vec<(usize, String)> {
         i += 1;
     }
     hits
+}
+
+/// True if a plain `%n` (no positional index or length modifier) is directly
+/// followed by a letter: the start of a word in prose (`"%null%"`,
+/// `"% number of"`), not a directive. Exploit strings end the directive, or
+/// put another directive or an index or length modifier on it.
+fn is_word_start(dir: &[u8], next: Option<&u8>) -> bool {
+    next.is_some_and(u8::is_ascii_alphabetic)
+        && !dir.iter().any(|b| matches!(b, b'$' | b'h' | b'l'))
 }
 
 /// Parse a printf format directive starting at byte 0 of `tail` (which must
@@ -1495,7 +1506,7 @@ fn emit_decorative_whitespace_findings(
     lang: Language,
     tokens: &[Token],
 ) -> Vec<Finding> {
-    if !matches!(lang, Language::C) {
+    if !matches!(lang, Language::C | Language::Cpp) {
         return Vec::new();
     }
     let mut total_lines = 0usize;
@@ -1644,7 +1655,7 @@ fn emit_line_continuation_findings(
     lang: Language,
     tokens: &[Token],
 ) -> Vec<Finding> {
-    if !matches!(lang, Language::C) {
+    if !matches!(lang, Language::C | Language::Cpp) {
         return Vec::new();
     }
     let mut findings = Vec::new();
@@ -2173,6 +2184,37 @@ mod tests {
             .expect("expected FormatStringWrite for orphan $hhn");
         assert!(hit.message.contains("`$hhn`"));
         assert!(hit.message.contains("macro definition"));
+    }
+
+    #[test]
+    fn percent_n_starting_a_word_does_not_fire() {
+        for src in [
+            &br#"q = "SELECT * WHERE x LIKE '%null%'";"#[..],
+            br#"s = "values per block % number of blocks";"#,
+            br#"s = "%-5name";"#,
+        ] {
+            let findings = run_fmt_write(src, Language::Cpp);
+            assert!(findings.is_empty(), "{:?}", findings);
+        }
+        // Still fires at the end of a string, before a non-letter, and with
+        // an index or length modifier even when a letter follows.
+        for src in [
+            &br#"printf("AAAA%n");"#[..],
+            br#"printf("%n%n%n");"#,
+            br#"printf("%n %d");"#,
+            br#"printf("%hhnX");"#,
+            br#"printf("%7$nAB");"#,
+            br#"printf("%lnz");"#,
+        ] {
+            let findings = run_fmt_write(src, Language::C);
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.kind == SignalKind::FormatStringWrite),
+                "{}",
+                String::from_utf8_lossy(src)
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # disclude
 
-Scan source code for signs of hidden intent and obfuscation, including Unicode attacks, encoded payloads, dynamic execution patterns, and supply-chain escape hatches. This is not a general purpose vulnerability scanner: `disclude` is a static analysis tool specialized in finding hidden malicious code in C, Rust, Python, TypeScript, and Bash. It also scans text and structured-markup files (`.txt`, `.md`, `.yaml`, `.rst`) for hidden payloads, and extracts the code embedded in them — shell in CI workflows, code fences in docs — to run the same language-specific checks on it.
+Scan source code for signs of hidden intent and obfuscation, including Unicode attacks, encoded payloads, dynamic execution patterns, and supply-chain escape hatches. This is not a general purpose vulnerability scanner: `disclude` is a static analysis tool specialized in finding hidden malicious code in C, C++, Rust, Python, TypeScript, and Bash. It also scans text and structured-markup files (`.txt`, `.md`, `.yaml`, `.rst`) for hidden payloads, and extracts the code embedded in them — shell in CI workflows, code fences in docs — to run the same language-specific checks on it.
 
 The static analyzer is implemented in fast, multi-threaded Rust, and employs three views of the code: as raw strings, as custom tokens, and as a full abstract syntax tree. An optional fourth pass sends findings to an LLM (Anthropic, OpenAI, or Ollama) to eliminate false-positives and provide confidence scores. Combining robust static analysis with targeted LLM review provides speed, cost efficiency, and excellent detection quality.
 
@@ -49,7 +49,7 @@ disclude scan <path> [options]
 | `--severity` | `warn` | Minimum severity to report: `info`, `warn`, `critical` |
 | `--exit-code` | off | Exit 1 if any findings at or above threshold |
 | `--diff <ref>` | — | Annotate findings introduced since a git ref (`main`, a tag, a SHA) |
-| `--lang <lang>` | auto | Override language detection: `python`, `rust`, `ts`, `js`, `c`, `bash`/`sh`/`shell` |
+| `--lang <lang>` | auto | Override language detection: `python`, `rust`, `ts`, `js`, `c`, `cpp`, `bash`/`sh`/`shell` |
 | `--ignore <file>` | — | Additional ignore file (gitignore syntax) |
 | `--no-raw` | — | Skip raw byte analysis |
 | `--no-token` | — | Skip token-level analysis |
@@ -156,6 +156,7 @@ Language is detected from file extension or shebang line.
 |---|---|---|
 | Bash/Shell | `.sh`, `.bash`, `.bsh`, `.ksh`, `.zsh` | `bash`, `sh`, `ksh`, `zsh` |
 | C | `.c`, `.h` | — |
+| C++ | `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`, `.ipp`, `.tpp`, `.inl`; `.h` whose code is C++ (`template <`, `namespace … {`, `class X {`, `a::b`) | — |
 | Python | `.py`, `.pyi` | `python` |
 | Rust | `.rs` | — |
 | TypeScript | `.ts`, `.tsx`, `.mts`, `.cts` | — |
@@ -214,7 +215,7 @@ These run on every file regardless of language.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `encoding-base64` | warn | Base64-shaped blob in a string literal. Threshold: ≥64 chars for unpadded blobs; ≥40 chars when the blob ends with `=` or `==` padding (padding is definitive proof of base64 encoding, ruling out hex digests and identifiers). Often used to embed payloads or C2 URLs that are decoded and requested at runtime. Demoted to `info` outside string literals. Not reported for an alphabet written out in order (`ABCD…xyz0123…+/`), or for a Subresource Integrity digest (`sha256-`/`sha384-`/`sha512-` followed by exactly that digest's base64 length), as in lockfiles and HTML `integrity` attributes. Base64 wrapped over lines (each line ≥40 characters, indentation allowed, as `base64`, MIME and PEM write it) is joined and judged once as a single blob, reported at its first line. |
+| `encoding-base64` | warn | Base64-shaped blob in a string literal. Threshold: ≥64 chars for unpadded blobs; ≥40 chars when the blob ends with `=` or `==` padding (padding is definitive proof of base64 encoding, ruling out hex digests and identifiers). Often used to embed payloads or C2 URLs that are decoded and requested at runtime. Demoted to `info` outside string literals. Not reported for an alphabet written out in order (`ABCD…xyz0123…+/`), or for a Subresource Integrity digest (`sha256-`/`sha384-`/`sha512-` followed by exactly that digest's base64 length), as in lockfiles and HTML `integrity` attributes. Base64 wrapped over lines (each line ≥40 characters, indentation allowed, as `base64`, MIME and PEM write it) is joined and judged once as a single blob, reported at its first line. Base64 written one string literal per line (`"MIIC…\n"`, a PEM in C++ test code) is reported once for the run of lines, with its row count and line span, as for escape-run tables. |
 | `encoding-hex` | warn | Long run of `\xNN` hex escape sequences in a string literal. A common way to embed shellcode or obfuscated text. Demoted to `info` outside string literals. |
 | `encoding-octal` | warn | Long run of `\NNN` octal escape sequences (≥6 consecutive, minimum entropy 2.5 bits/byte). Octal is less recognizable than hex and valid in C, Python, and JavaScript — used to encode arbitrary bytes or hide printable characters (`\101` for `A`, `\012` for newline). Demoted to `info` outside string literals. |
 | `encoding-escape-soup` | warn | Dense mix of arbitrary escape sequences. Indicates content that has been serialized or obfuscated to avoid plain-text grep. A table of such runs on neighbouring lines (test vectors) is reported once, with its row count and line span; rows on lines new since `--diff` are still reported each on their own. |
@@ -298,9 +299,9 @@ source $CONFIG_DIR/init.sh
 curl -fsSL https://example.com/install.sh | bash
 ```
 
-### Dynamic execution — C
+### Dynamic execution — C and C++
 
-AST pass; tree-sitter.
+AST pass; tree-sitter. C++ runs the C checks through tree-sitter-cpp, and also matches the calls qualified with `std::` or `::` (`std::system(cmd)`). The C-specific obfuscation signals below apply to C++ too, except `legacy-k-and-r-main` and `implicit-int-function`. C++ raw strings (`R"d(…)d"`) are string literals for every check.
 
 | Signal | Severity | Description |
 |---|---|---|
@@ -316,7 +317,7 @@ AST pass; tree-sitter.
 | `macro-keyword-override` | warn | Token pass. `#define <keyword> <body>` where `<keyword>` is a reserved pre-C11 keyword (`int`, `char`, `double`, `union`, `for`, `return`, …) and the replacement body is non-empty. Rebinding a keyword silently changes what every later occurrence in the file means — an IOCCC favourite (`#define double(a,b) int`, `#define union static struct`). C11+ pseudo-keywords (`_Static_assert`, `_Generic`, `_Atomic`, `_Alignas`, `_Alignof`, `_Thread_local`, `_Noreturn`) are excluded because real codebases routinely polyfill them. Empty-body shims (`#define inline`) are excluded. |
 | `identifier-confusable-collision` | warn | Token pass. Two distinct identifiers in the same file collapse to the same visual skeleton after grouping confusable characters — round-O `0`/`O`/`o` and vertical-stroke `1`/`l`/`I` (lowercase `i` is excluded; its dot makes it visually distinct). Fires only when at least one position differs as digit-vs-letter (`_0` vs `_O`, `x0` vs `xO`); pure case-pair collisions like `Object`/`object` are excluded as a common C convention rather than the IOCCC digit-letter swap. |
 | `numeric-literal-payload` | critical | AST pass. A wide-numeric array (≥ 8 elements of `short`, `int`, `long`, `long long`, `float`, `double`, `long double`, `wchar_t`, `size_t`, `int16_t`/`int32_t`/`int64_t`, `uint16_t`/`uint32_t`/`uint64_t`, `intptr_t`, `uintptr_t`, …) that is later reinterpreted through a byte-pointer cast (`char *`, `unsigned char *`, `signed char *`, `int8_t *`, `uint8_t *`). Hides arbitrary bytes inside what looks like a table of floating-point or integer constants. Findings are deduped per array — one report per array citing the cast count. |
-| `format-string-write` | critical | Token pass. `printf`-family format string contains a `%n` write directive (`%n`, `%hhn`, `%hn`, `%ln`, `%lln`, with optional positional `%<digit>$…n`). The `n` conversion writes the byte-count-so-far into an `int *` argument — a memory write primitive seen almost exclusively in CTF/exploit code and IOCCC entries. Detected inside string literals and inside `#define` macro bodies (catches the IOCCC stringification trick `#define N(a) "%"#a"$hhn"`, where the `$hhn` directive tail is split across stringification). Comments mentioning `%n` are excluded — both standalone and embedded `/* ... */` / `// ...` inside `#define` lines. |
+| `format-string-write` | critical | Token pass. `printf`-family format string contains a `%n` write directive (`%n`, `%hhn`, `%hn`, `%ln`, `%lln`, with optional positional `%<digit>$…n`). The `n` conversion writes the byte-count-so-far into an `int *` argument — a memory write primitive seen almost exclusively in CTF/exploit code and IOCCC entries. Detected inside string literals and inside `#define` macro bodies (catches the IOCCC stringification trick `#define N(a) "%"#a"$hhn"`, where the `$hhn` directive tail is split across stringification). Comments mentioning `%n` are excluded — both standalone and embedded `/* ... */` / `// ...` inside `#define` lines. A plain `%n` directly followed by a letter is the start of a word in prose (`"%null%"`, `"% number of"`) and is skipped; one with a positional index or length modifier still fires. |
 | `legacy-k-and-r-main` | warn | AST pass. `main()` defined without an explicit return type — pre-ANSI K&R style (`main() { ... }` or `main(argc, argv) int argc; char **argv; { ... }`). Modern C requires `int main(...)`; the implicit-int form is undefined behaviour in C99+ and is a strong indicator of intentionally archaic source (IOCCC entries) or pre-1989 code. |
 | `implicit-int-function` | warn | AST pass. Three or more functions in the same file are defined without an explicit return type (pre-ANSI K&R implicit-`int`). Catches IOCCC sources where every function is shaped `Q(a){return a;}`. The single-function `main()` form is reported by `legacy-k-and-r-main`; this signal is the file-wide pattern. Neither is reported for a C++ header (`.h` whose code has `template <` or `namespace … {`), where C's grammar misreads templates and member functions as functions without a return type. |
 | `dynamic-format-string` | warn | AST pass. A `printf`-family call (`printf`, `fprintf`, `dprintf`, `sprintf`, `snprintf`, `asprintf`, and the `w`-wide variants) uses a non-literal format string — the classic format-string-bug shape. The `v*` variadic forwarders are excluded by design. Bare-identifier format args that resolve to a parameter or local variable of the enclosing function are excluded (legitimate format selection). SCREAMING_SNAKE_CASE names are treated as macro-defined formats and excluded, as are `i18n` wrappers (`_(...)`, `gettext(...)`, `dgettext`, `ngettext`, …). |
@@ -337,6 +338,10 @@ AST pass; language-specific.
 
 
 ## What is New
+
+### 4.0.0
+
+Added support for C++ and supporting file formats.
 
 ### 3.8.2
 

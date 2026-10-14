@@ -1,4 +1,6 @@
-//! C AST walker — tree-sitter-c based checks.
+//! C AST walker — tree-sitter-c based checks, also run on C++ through
+//! tree-sitter-cpp, whose grammar extends C's (same node kinds for calls,
+//! literals, declarations and preprocessor directives).
 //!
 //! The walker detects a small, high-signal set of dangerous call patterns
 //! that are commonly used in supply-chain attacks or obfuscated C code:
@@ -66,11 +68,23 @@ const I18N_WRAPPERS: &[&str] = &[
 ];
 
 pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
+    analyze_with(path, bytes, &tree_sitter_c::LANGUAGE.into(), false)
+}
+
+/// The C checks on C++ source, parsed as C++. The pre-ANSI checks
+/// (implicit `int`, K&R `main`) are C-only.
+pub fn analyze_cpp(path: &Path, bytes: &[u8]) -> AstOutcome {
+    analyze_with(path, bytes, &tree_sitter_cpp::LANGUAGE.into(), true)
+}
+
+fn analyze_with(
+    path: &Path,
+    bytes: &[u8],
+    language: &tree_sitter::Language,
+    cpp: bool,
+) -> AstOutcome {
     let mut parser = Parser::new();
-    if parser
-        .set_language(&tree_sitter_c::LANGUAGE.into())
-        .is_err()
-    {
+    if parser.set_language(language).is_err() {
         return AstOutcome {
             findings: Vec::new(),
             parse_error: Some("tree-sitter: set_language failed".into()),
@@ -102,7 +116,7 @@ pub fn analyze(path: &Path, bytes: &[u8]) -> AstOutcome {
     // C++ headers (`.h` in Arrow, Abseil, …) parse as C with recovery: a
     // `template <…>` or a member function reads as a function lacking its
     // return type. Those checks are about C written pre-ANSI; C++ is not.
-    if !is_cpp(root, bytes) {
+    if !cpp && !is_cpp(root, bytes) {
         check_legacy_kr_main(root, bytes, path, &index, &mut findings);
         check_implicit_int_functions(root, bytes, path, &index, &mut findings);
     }
@@ -148,12 +162,25 @@ fn check_call(
     let Some(func) = node.child_by_field_name("function") else {
         return;
     };
-    // Only inspect direct identifier callees; function pointers and member
-    // expressions are handled elsewhere or are out of scope.
-    if func.kind() != "identifier" {
-        return;
-    }
-    let name = node_text(func, bytes);
+    // Only inspect direct identifier callees, and in C++ the same names
+    // qualified with `std::` or the global scope (`std::system`,
+    // `::popen`); function pointers, member calls and other namespaces are
+    // out of scope.
+    let name = match func.kind() {
+        "identifier" => node_text(func, bytes),
+        "qualified_identifier" => {
+            let text = node_text(func, bytes);
+            let Some(name) = text
+                .strip_prefix("std::")
+                .or_else(|| text.strip_prefix("::"))
+                .filter(|n| n.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+            else {
+                return;
+            };
+            name
+        }
+        _ => return,
+    };
 
     let Some(args) = node.child_by_field_name("arguments") else {
         return;
@@ -614,9 +641,13 @@ fn positional_args(args: Node) -> Vec<Node> {
     out
 }
 
-/// True if the node is a C string literal (`"..."` or `L"..."`).
+/// True if the node is a string literal (`"..."`, `L"..."`, adjacent
+/// literals, or a C++ raw string `R"(...)"`).
 fn is_string_literal(node: Node) -> bool {
-    node.kind() == "string_literal" || node.kind() == "concatenated_string"
+    matches!(
+        node.kind(),
+        "string_literal" | "concatenated_string" | "raw_string_literal"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1541,6 +1572,46 @@ mod tests {
 
     fn run(src: &[u8]) -> Vec<Finding> {
         analyze(&PathBuf::from("test.c"), src).findings
+    }
+
+    fn run_cpp(src: &[u8]) -> Vec<Finding> {
+        analyze_cpp(&PathBuf::from("test.cpp"), src).findings
+    }
+
+    #[test]
+    fn cpp_calls_qualified_with_std_or_global_scope_are_checked() {
+        let severities = |src: &[u8]| -> Vec<Severity> {
+            run_cpp(src)
+                .iter()
+                .filter(|f| f.kind == SignalKind::DynamicExecution)
+                .map(|f| f.severity)
+                .collect()
+        };
+        let src = b"namespace a {\nvoid f(const std::string& c) { std::system(c.c_str()); }\n}\n";
+        assert_eq!(severities(src), [Severity::Critical]);
+        assert_eq!(
+            severities(b"void f(const char* c) { ::popen(c, \"r\"); }\n"),
+            [Severity::Critical]
+        );
+        // A raw string is a literal.
+        assert_eq!(
+            severities(b"void f() { std::system(R\"(ls -l)\"); }\n"),
+            [Severity::Warn]
+        );
+        // Another namespace's `system`, or a member function, is not libc's.
+        assert!(severities(b"void f(Cmd c) { tools::system(c); }\n").is_empty());
+        assert!(severities(b"void f(Shell& s, Cmd c) { s.system(c); }\n").is_empty());
+    }
+
+    #[test]
+    fn cpp_skips_the_pre_ansi_checks() {
+        // A C++ constructor or member reads as a function without a return
+        // type; implicit int is a C-only question.
+        let src =
+            b"template <typename T>\nclass Box {\n public:\n  Box(T s) : s_(s) {}\n  T s_;\n};\n";
+        assert!(run_cpp(src)
+            .iter()
+            .all(|f| f.kind != SignalKind::ImplicitIntFunction));
     }
 
     #[test]

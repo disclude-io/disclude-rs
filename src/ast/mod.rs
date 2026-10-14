@@ -62,6 +62,7 @@ pub fn analyze(path: &Path, bytes: &[u8], lang: Language) -> AstOutcome {
     match lang {
         Language::Bash => bash::analyze(path, bytes),
         Language::C => c::analyze(path, bytes),
+        Language::Cpp => c::analyze_cpp(path, bytes),
         Language::Python => python::analyze(path, bytes),
         Language::Rust => rust::analyze(path, bytes),
         Language::TypeScript | Language::JavaScript => typescript::analyze(path, bytes, lang),
@@ -104,6 +105,7 @@ mod tests {
             (Language::Python, "#\n", "py"),
             (Language::Bash, "#\n", "sh"),
             (Language::C, "//\n", "c"),
+            (Language::Cpp, "//\n", "cpp"),
             (Language::Rust, "//\n", "rs"),
         ] {
             let src = line.repeat(lines);
