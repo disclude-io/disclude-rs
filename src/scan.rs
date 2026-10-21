@@ -15,6 +15,7 @@ use crate::embedded;
 use crate::finding::{
     DiagnosticKind, FileAnalysis, Finding, ScanDiagnostic, ScanResult, Severity, SignalKind,
 };
+use crate::hidden;
 use crate::ignore::walk;
 use crate::language::Language;
 use crate::package_json;
@@ -298,6 +299,16 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
         // findings back to file coordinates. Raw-pass findings outside any
         // block are kept as-is — the global payload scan.
         findings = analyze_markup_blocks(path, &bytes, language, &index, findings, opts);
+        if opts.run_ast {
+            // Instructions for a model in what the page doesn't render.
+            findings.extend(hidden::analyze(path, &bytes, language, &index));
+            if language == Language::Html {
+                findings.extend(embedded::html::reference_findings(path, &bytes, &index));
+            }
+        }
+        if language == Language::Html {
+            demote_inline_images(&bytes, &mut findings);
+        }
     } else {
         if opts.run_token {
             findings = token::analyze(path, &bytes, language, &index, findings);
@@ -334,6 +345,28 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
         file_complexity_max: complexity_max,
         parse_error,
     }))
+}
+
+/// An image inlined as a `data:image/…;base64,` URI is base64 by design and
+/// common in HTML: its `encoding-base64` finding is kept, at info.
+fn demote_inline_images(bytes: &[u8], findings: &mut [crate::finding::Finding]) {
+    const MARK: &[u8] = b";base64,";
+    for f in findings
+        .iter_mut()
+        .filter(|f| f.kind == crate::finding::SignalKind::EncodingBase64)
+    {
+        let start = f.byte_offset;
+        if start < MARK.len() || &bytes[start - MARK.len()..start] != MARK {
+            continue;
+        }
+        let head = &bytes[start.saturating_sub(MARK.len() + 64)..start - MARK.len()];
+        let is_image = head
+            .windows(11)
+            .any(|w| w.eq_ignore_ascii_case(b"data:image/"));
+        if is_image {
+            f.severity = crate::finding::Severity::Info;
+        }
+    }
 }
 
 /// Token/AST analysis for markup files: extract embedded code blocks, scan each
@@ -374,7 +407,16 @@ fn analyze_markup_blocks(
             Language::Bash => embedded::shell_session_commands(&bytes[block.start..block.end]),
             _ => None,
         };
-        let slice = session.as_deref().unwrap_or(&bytes[block.start..block.end]);
+        // An HTML attribute is scanned as the browser runs it: references
+        // decoded (see `embedded::html::decode_block`).
+        let decoded = match language {
+            Language::Html => embedded::html::decode_block(bytes, block),
+            _ => None,
+        };
+        let slice = session
+            .as_deref()
+            .or(decoded.as_deref())
+            .unwrap_or(&bytes[block.start..block.end]);
         let local_index = LineIndex::new(slice);
 
         // Re-anchor the block's raw findings to block-local offsets so the

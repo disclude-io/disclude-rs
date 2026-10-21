@@ -1,6 +1,6 @@
 [package]
 name = "disclude"
-version = "4.0.0"
+version = "4.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/disclude-io/disclude-rs"
@@ -38,6 +38,7 @@ tree-sitter-typescript = "0.23.2"
 tree-sitter-bash = "0.25.1"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-md = "0.5.3"
+tree-sitter-html = "0.23.2"
 
 [profile.release]
 lto = "thin"

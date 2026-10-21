@@ -68,7 +68,7 @@ pub fn analyze(path: &Path, bytes: &[u8], lang: Language) -> AstOutcome {
         Language::TypeScript | Language::JavaScript => typescript::analyze(path, bytes, lang),
         // Markup languages have no AST pass of their own; embedded code blocks
         // are analyzed under their resolved code language instead.
-        Language::Text | Language::Markdown | Language::Yaml | Language::Rst => {
+        Language::Text | Language::Markdown | Language::Yaml | Language::Rst | Language::Html => {
             AstOutcome::default()
         }
     }

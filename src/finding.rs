@@ -75,6 +75,8 @@ pub enum SignalKind {
     PathCommandShadow,
     EncryptedArchiveExtraction,
     ReversedDecodeInput,
+    // Markup structure
+    HiddenLlmInstruction,
 }
 
 impl SignalKind {
@@ -134,6 +136,7 @@ impl SignalKind {
             SignalKind::PathCommandShadow => "path-command-shadow",
             SignalKind::EncryptedArchiveExtraction => "encrypted-archive-extraction",
             SignalKind::ReversedDecodeInput => "reversed-decode-input",
+            SignalKind::HiddenLlmInstruction => "hidden-llm-instruction",
         }
     }
 }

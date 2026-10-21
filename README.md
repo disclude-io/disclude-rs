@@ -165,14 +165,16 @@ Language is detected from file extension or shebang line.
 | Markdown | `.md`, `.markdown` | — |
 | YAML | `.yaml`, `.yml` | — |
 | reStructuredText | `.rst` | — |
+| HTML | `.html`, `.htm`, `.xhtml` | — |
 
-Text and markup files are always scanned by the raw byte-level pass (Unicode attacks, encoded payloads, entropy). For Markdown, YAML, and reStructuredText, disclude additionally **isolates embedded code and scans it with the matching language's token and AST passes**, reporting findings at their location in the markup file:
+Text and markup files are always scanned by the raw byte-level pass (Unicode attacks, encoded payloads, entropy). For Markdown, YAML, reStructuredText, and HTML, disclude additionally **isolates embedded code and scans it with the matching language's token and AST passes**, reporting findings at their location in the markup file:
 
 | Markup | Embedded code extracted | Scanned as |
 |---|---|---|
 | Markdown | Fenced code blocks (` ```bash `, ` ```python `, …) | the fence's language |
 | YAML | GitHub Actions `run:` (honoring `shell:`), GitLab CI `script:`/`before_script:`/`after_script:`, Ansible `shell`/`command` | shell (or the selected interpreter) |
 | reStructuredText | `.. code-block:: <lang>` / `.. sourcecode:: <lang>` directive bodies | the directive's language |
+| HTML | `<script>` bodies (no `type`, or a JavaScript type), event-handler attributes (`onclick`, `onerror`, …), `javascript:` URLs in `href`/`src`/`action`/`formaction`; attribute values with character references decoded, as a browser runs them | JavaScript |
 
 Code blocks in a language disclude does not scan (e.g. ` ```json `, plain text) are covered by the raw payload pass only.
 
@@ -215,10 +217,10 @@ These run on every file regardless of language.
 
 | Signal | Severity | Description |
 |---|---|---|
-| `encoding-base64` | warn | Base64-shaped blob in a string literal. Threshold: ≥64 chars for unpadded blobs; ≥40 chars when the blob ends with `=` or `==` padding (padding is definitive proof of base64 encoding, ruling out hex digests and identifiers). Often used to embed payloads or C2 URLs that are decoded and requested at runtime. Demoted to `info` outside string literals. Not reported for an alphabet written out in order (`ABCD…xyz0123…+/`), or for a Subresource Integrity digest (`sha256-`/`sha384-`/`sha512-` followed by exactly that digest's base64 length), as in lockfiles and HTML `integrity` attributes. Base64 wrapped over lines (each line ≥40 characters, indentation allowed, as `base64`, MIME and PEM write it) is joined and judged once as a single blob, reported at its first line. Base64 written one string literal per line (`"MIIC…\n"`, a PEM in C++ test code) is reported once for the run of lines, with its row count and line span, as for escape-run tables. |
+| `encoding-base64` | warn | Base64-shaped blob in a string literal. Threshold: ≥64 chars for unpadded blobs; ≥40 chars when the blob ends with `=` or `==` padding (padding is definitive proof of base64 encoding, ruling out hex digests and identifiers). Often used to embed payloads or C2 URLs that are decoded and requested at runtime. Demoted to `info` outside string literals. Not reported for an alphabet written out in order (`ABCD…xyz0123…+/`), or for a Subresource Integrity digest (`sha256-`/`sha384-`/`sha512-` followed by exactly that digest's base64 length), as in lockfiles and HTML `integrity` attributes. In HTML, an image inlined as a `data:image/…;base64,` URI is reported at `info`. Base64 wrapped over lines (each line ≥40 characters, indentation allowed, as `base64`, MIME and PEM write it) is joined and judged once as a single blob, reported at its first line. Base64 written one string literal per line (`"MIIC…\n"`, a PEM in C++ test code) is reported once for the run of lines, with its row count and line span, as for escape-run tables. |
 | `encoding-hex` | warn | Long run of `\xNN` hex escape sequences in a string literal. A common way to embed shellcode or obfuscated text. Demoted to `info` outside string literals. |
 | `encoding-octal` | warn | Long run of `\NNN` octal escape sequences (≥6 consecutive, minimum entropy 2.5 bits/byte). Octal is less recognizable than hex and valid in C, Python, and JavaScript — used to encode arbitrary bytes or hide printable characters (`\101` for `A`, `\012` for newline). Demoted to `info` outside string literals. |
-| `encoding-escape-soup` | warn | Dense mix of arbitrary escape sequences. Indicates content that has been serialized or obfuscated to avoid plain-text grep. A table of such runs on neighbouring lines (test vectors) is reported once, with its row count and line span; rows on lines new since `--diff` are still reported each on their own. |
+| `encoding-escape-soup` | warn | Dense mix of arbitrary escape sequences. Indicates content that has been serialized or obfuscated to avoid plain-text grep. In HTML, also an event handler or `javascript:` URL that spells three or more letters or digits as character references (`onclick="&#101;&#118;&#97;l(…)"`): the browser decodes them, so nothing needs them. A table of such runs on neighbouring lines (test vectors) is reported once, with its row count and line span; rows on lines new since `--diff` are still reported each on their own. |
 
 ### Code structure anomalies
 
@@ -326,6 +328,14 @@ AST pass; tree-sitter. C++ runs the C checks through tree-sitter-cpp, and also m
 | `recursive-main-call` | warn | AST pass. `main` is called from inside another function in the same TU — recursion through `main` is an IOCCC pattern (loop using `argc`/`argv` to thread state). The runtime is the only legitimate caller of `main`. The K&R `main() { ... }` definition shape (where tree-sitter wraps the bare signature in an `ERROR` containing a `call_expression`) is excluded so the implicit-int main definition isn't misread as a self-call. |
 | `stringify-dereference` | warn | AST pass. A function-like macro body contains `*#param` — the `#` operator stringifies the macro argument into a string literal, and the leading `*` dereferences it to extract the first byte. A one-character literal extraction trick used in IOCCC code (e.g. `*c == *#v` to compare a runtime char against the first letter of a macro-arg token). Token paste `##` is excluded. |
 
+### Hidden instructions
+
+Markup structure; HTML and Markdown.
+
+| Signal | Severity | Description |
+|---|---|---|
+| `hidden-llm-instruction` | warn | Instructions addressed to an AI model, placed where the page doesn't render them: an HTML comment, a `data-*` attribute, a `<script type="application/json">` or `application/ld+json` data island (following JSON written inside its strings), or an element hidden with `hidden`, `aria-hidden`, `<template>`, or an inline style (`display:none`, `visibility:hidden`, `font-size:0`, `opacity:0`, off-screen positioning); in Markdown, an HTML comment outside code. A model that reads the source (a support chatbot indexing help pages, a coding agent reading a README) sees text that people don't. Reported when a directive (`do not`, `never`, `always`, `omit`, …) concerns what an answer says (`recommend`, `mention`, `cite`, …) or addresses a model or "the user"; in data islands and attributes, which script may render, interface copy written to the reader (`you`, `please`) needs the latter. Any prose in an attribute named for a model (`data-ai-…`, `data-llm-…`, `data-prompt-…`) is reported. Critical for prompt-injection phrases: `ignore all previous instructions`, `do not tell the user`, `system prompt`, `you are now`. The finding quotes, and points at, the sentences that instruct, not the facts around them. English only. |
+
 ### Build-time and install-time
 
 AST pass; language-specific.
@@ -338,6 +348,10 @@ AST pass; language-specific.
 
 
 ## What is New
+
+### 4.1.0
+
+Added support for HTML, and the `hidden-llm-instruction` signal for instructions to AI models hidden in HTML and Markdown.
 
 ### 4.0.0
 

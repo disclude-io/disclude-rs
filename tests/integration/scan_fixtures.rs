@@ -2008,6 +2008,140 @@ fn markdown_clean_emits_no_findings() {
 }
 
 #[test]
+fn html_scripts_handlers_and_urls_are_scanned_as_javascript() {
+    let r = run();
+    for file in [
+        "html/event_handler.html",
+        "html/javascript_url.html",
+        "html/entity_handler.html",
+    ] {
+        assert!(
+            has_kind_in(&r, file, SignalKind::DynamicExecution),
+            "{file}"
+        );
+    }
+    // Character references are decoded first, and spelling `eval` in them
+    // is reported.
+    assert!(has_kind_in(
+        &r,
+        "html/entity_handler.html",
+        SignalKind::EncodingEscapeSoup
+    ));
+}
+
+#[test]
+fn html_embedded_finding_maps_to_real_line() {
+    let r = run();
+    let file = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("html/event_handler.html")
+        })
+        .expect("event_handler.html fixture was scanned");
+    assert_eq!(file.language, Language::Html);
+    let hit = file
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::DynamicExecution && f.severity == Severity::Critical)
+        .expect("eval finding present");
+    assert_eq!(hit.line, 5);
+    assert!(
+        hit.message.contains("[embedded javascript]"),
+        "{}",
+        hit.message
+    );
+}
+
+#[test]
+fn hidden_llm_instructions_are_found_where_pages_do_not_render() {
+    let r = run();
+    for (file, severity) in [
+        ("html/hidden_comment.html", Severity::Warn),
+        ("html/data_ai_note.html", Severity::Warn),
+        ("html/hidden_element.html", Severity::Warn),
+        ("html/json_island.html", Severity::Warn),
+        ("markdown/agent_comment.md", Severity::Critical),
+    ] {
+        let fa = r
+            .files
+            .iter()
+            .find(|fa| fa.path.to_string_lossy().ends_with(file))
+            .unwrap_or_else(|| panic!("{file} was scanned"));
+        assert!(
+            fa.findings
+                .iter()
+                .any(|f| f.kind == SignalKind::HiddenLlmInstruction && f.severity == severity),
+            "{file}: {:?}",
+            fa.findings
+        );
+    }
+    // Both of the comment fixture's notes, each on its own line.
+    let comments = r
+        .files
+        .iter()
+        .find(|fa| {
+            fa.path
+                .to_string_lossy()
+                .ends_with("html/hidden_comment.html")
+        })
+        .unwrap();
+    let lines: Vec<usize> = comments
+        .findings
+        .iter()
+        .filter(|f| f.kind == SignalKind::HiddenLlmInstruction)
+        .map(|f| f.line)
+        .collect();
+    assert_eq!(lines, [6, 7]);
+    // The note inside JSON written in a JSON string is found at its line.
+    let island = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("html/json_island.html"))
+        .unwrap();
+    let note = island
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::HiddenLlmInstruction)
+        .unwrap();
+    assert!(
+        note.message.contains("nested JSON string"),
+        "{}",
+        note.message
+    );
+    assert!(note.snippet.contains("Do not recommend contacting"));
+}
+
+#[test]
+fn html_and_markdown_clean_fixtures_have_nothing_above_info() {
+    let r = run();
+    for file in ["html/clean.html", "markdown/comments.md"] {
+        let fa = r
+            .files
+            .iter()
+            .find(|fa| fa.path.to_string_lossy().ends_with(file))
+            .unwrap_or_else(|| panic!("{file} was scanned"));
+        assert!(
+            fa.findings.iter().all(|f| f.severity == Severity::Info),
+            "{file}: {:?}",
+            fa.findings
+        );
+    }
+    // The inline image's base64 is kept, at info.
+    let clean = r
+        .files
+        .iter()
+        .find(|fa| fa.path.to_string_lossy().ends_with("html/clean.html"))
+        .unwrap();
+    assert!(clean
+        .findings
+        .iter()
+        .any(|f| f.kind == SignalKind::EncodingBase64 && f.severity == Severity::Info));
+}
+
+#[test]
 fn rst_code_block_emits_embedded_bash_finding() {
     // `.. code-block:: bash` body (after a `:linenos:` option) is scanned as
     // Bash; `eval "$REMOTE_CMD"` fires.

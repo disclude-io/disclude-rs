@@ -236,6 +236,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::PathCommandShadow,
     SignalKind::EncryptedArchiveExtraction,
     SignalKind::ReversedDecodeInput,
+    SignalKind::HiddenLlmInstruction,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -294,6 +295,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::PathCommandShadow => "PathCommandShadow",
         SignalKind::EncryptedArchiveExtraction => "EncryptedArchiveExtraction",
         SignalKind::ReversedDecodeInput => "ReversedDecodeInput",
+        SignalKind::HiddenLlmInstruction => "HiddenLlmInstruction",
     }
 }
 
@@ -416,6 +418,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::ReversedDecodeInput => {
             "Input is reversed before being decoded or decompressed — hides an encoded payload from signature and prefix matching"
+        }
+        SignalKind::HiddenLlmInstruction => {
+            "Instructions addressed to an AI model, placed where a page does not render them (a comment, a data attribute, a JSON data island, a hidden element)"
         }
     }
 }

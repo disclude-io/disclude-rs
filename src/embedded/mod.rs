@@ -1,6 +1,6 @@
 //! Embedded code-block extraction for markup files.
 //!
-//! Markup files (`.md`, `.yaml`, `.rst`) routinely carry executable code:
+//! Markup files (`.md`, `.yaml`, `.rst`, `.html`) routinely carry executable code:
 //! shell in GitHub Actions / GitLab CI / Ansible YAML scalars, language code
 //! fences in Markdown docs, `code-block` directives in reStructuredText. Those
 //! blocks are invisible to disclude's per-language scanners unless we first
@@ -16,6 +16,7 @@ use std::path::Path;
 
 use crate::language::Language;
 
+pub mod html;
 pub mod markdown;
 pub mod rst;
 pub mod yaml;
@@ -49,6 +50,7 @@ pub fn extract(_path: &Path, bytes: &[u8], lang: Language) -> Vec<CodeBlock> {
         Language::Markdown => markdown::extract(bytes),
         Language::Yaml => yaml::extract(bytes),
         Language::Rst => rst::extract(bytes),
+        Language::Html => html::extract(bytes),
         // Plain text and all code languages have nothing to extract here.
         _ => Vec::new(),
     }

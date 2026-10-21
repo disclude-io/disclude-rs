@@ -25,6 +25,9 @@ pub enum Language {
     /// reStructuredText: payload-scanned; `code-block`/`sourcecode` directive
     /// bodies extracted and scanned with the per-language passes.
     Rst,
+    /// HTML: payload-scanned; `<script>` bodies, event-handler attributes, and
+    /// `javascript:` URLs extracted and scanned as JavaScript.
+    Html,
 }
 
 impl Language {
@@ -44,6 +47,7 @@ impl Language {
             "md" | "markdown" => Some(Language::Markdown),
             "yaml" | "yml" => Some(Language::Yaml),
             "rst" => Some(Language::Rst),
+            "html" | "htm" | "xhtml" => Some(Language::Html),
             _ => None,
         }
     }
@@ -100,6 +104,7 @@ impl Language {
             "md" | "markdown" => Some(Language::Markdown),
             "yaml" | "yml" => Some(Language::Yaml),
             "rst" => Some(Language::Rst),
+            "html" | "htm" => Some(Language::Html),
             _ => None,
         }
     }
@@ -117,6 +122,7 @@ impl Language {
             Language::Markdown => "markdown",
             Language::Yaml => "yaml",
             Language::Rst => "rst",
+            Language::Html => "html",
         }
     }
 
@@ -126,7 +132,7 @@ impl Language {
     pub fn is_markup(&self) -> bool {
         matches!(
             self,
-            Language::Text | Language::Markdown | Language::Yaml | Language::Rst
+            Language::Text | Language::Markdown | Language::Yaml | Language::Rst | Language::Html
         )
     }
 
