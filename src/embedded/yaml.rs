@@ -4,7 +4,12 @@
 //! values keyed by a well-known name:
 //!
 //!   * GitHub Actions — `run:` step scalars, with an optional sibling `shell:`
-//!     selecting the interpreter (`bash`, `python`, …).
+//!     selecting the interpreter (`bash`, `python`, …), and the `script:`
+//!     input of `actions/github-script` (JavaScript). A step that runs under
+//!     PowerShell or cmd is not scanned, since disclude has no passes for
+//!     them: its `shell:`, the job's or workflow's `defaults.run.shell`, a
+//!     Windows `runs-on` (whose default shell is PowerShell), or an `if:`
+//!     limiting it to `runner.os == 'Windows'` says so.
 //!   * GitLab CI — `script:`, `before_script:`, `after_script:` (each a scalar
 //!     or a sequence of command scalars).
 //!   * Ansible — `shell:` / `command:` modules, including the fully-qualified
@@ -58,9 +63,9 @@ fn key_token(raw: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn handle_mapping(mapping: Node, bytes: &[u8], out: &mut Vec<CodeBlock>) {
-    // Gather direct (key, value) pairs of this mapping.
-    let mut pairs: Vec<(String, Node)> = Vec::new();
+/// The direct (key, value) pairs of a mapping, keys normalized.
+fn pairs_of<'t>(mapping: Node<'t>, bytes: &[u8]) -> Vec<(String, Node<'t>)> {
+    let mut pairs = Vec::new();
     let mut cursor = mapping.walk();
     for child in mapping.children(&mut cursor) {
         if child.kind() != "block_mapping_pair" && child.kind() != "flow_pair" {
@@ -76,26 +81,159 @@ fn handle_mapping(mapping: Node, bytes: &[u8], out: &mut Vec<CodeBlock>) {
             pairs.push((key_token(k), value));
         }
     }
+    pairs
+}
 
+/// A scalar value's text, unquoted.
+fn scalar_text<'b>(value: Node, bytes: &'b [u8]) -> &'b str {
+    std::str::from_utf8(&bytes[value.byte_range()])
+        .unwrap_or("")
+        .trim()
+        .trim_matches(['"', '\''])
+}
+
+/// The mapping a value node holds, if it holds one.
+fn mapping_in(value: Node) -> Option<Node> {
+    let mut node = value;
+    loop {
+        if matches!(node.kind(), "block_mapping" | "flow_mapping") {
+            return Some(node);
+        }
+        node = node.named_child(0)?;
+    }
+}
+
+/// What a GitHub Actions shell runs a `run:` block as. `None` for a shell
+/// disclude has no passes for (PowerShell, cmd).
+fn gha_shell(value: &str) -> Option<Language> {
+    // `bash -euo pipefail {0}`, `/usr/bin/python3 {0}`: the program decides.
+    let program = value
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match program.as_str() {
+        "pwsh" | "powershell" | "cmd" => None,
+        "python" | "python3" => Some(Language::Python),
+        "node" => Some(Language::JavaScript),
+        p => Some(Language::from_fence_info(p).unwrap_or(Language::Bash)),
+    }
+}
+
+/// The language of the `run:` block in a step mapping, from the step's
+/// `shell:`, else the nearest `defaults.run.shell`, else the runner: a
+/// Windows `runs-on`, or an `if:` naming Windows, means PowerShell.
+fn run_language(step: Node, pairs: &[(String, Node)], bytes: &[u8]) -> Option<Language> {
+    if let Some((_, v)) = pairs.iter().find(|(k, _)| k == "shell") {
+        return gha_shell(scalar_text(*v, bytes));
+    }
+    let windows = |text: &str| text.to_ascii_lowercase().contains("windows");
+    if let Some((_, v)) = pairs.iter().find(|(k, _)| k == "if") {
+        // Raw text: unquoting would also strip the quote ending `'Windows'`.
+        let cond = std::str::from_utf8(&bytes[v.byte_range()])
+            .unwrap_or("")
+            .replace(' ', "")
+            .to_ascii_lowercase();
+        if cond.contains("runner.os=='windows'") || cond.contains("runner.os==\"windows\"") {
+            return None;
+        }
+    }
+    // Up through the job and the workflow: the nearest `defaults.run.shell`
+    // wins; without one, the job's runner decides.
+    let mut on_windows = false;
+    let mut node = step.parent();
+    while let Some(n) = node {
+        if matches!(n.kind(), "block_mapping" | "flow_mapping") {
+            let outer = pairs_of(n, bytes);
+            let shell = outer
+                .iter()
+                .find(|(k, _)| k == "defaults")
+                .and_then(|(_, v)| mapping_in(*v))
+                .and_then(|m| pairs_of(m, bytes).into_iter().find(|(k, _)| k == "run"))
+                .and_then(|(_, v)| mapping_in(v))
+                .and_then(|m| pairs_of(m, bytes).into_iter().find(|(k, _)| k == "shell"));
+            if let Some((_, v)) = shell {
+                return gha_shell(scalar_text(v, bytes));
+            }
+            if let Some((_, v)) = outer.iter().find(|(k, _)| k == "runs-on") {
+                on_windows |= windows(scalar_text(*v, bytes));
+            }
+        }
+        node = n.parent();
+    }
+    (!on_windows).then_some(Language::Bash)
+}
+
+/// True if `mapping` is the `with:` of a step that uses
+/// `actions/github-script`, whose `script:` input is JavaScript.
+fn is_github_script_inputs(mapping: Node, bytes: &[u8]) -> bool {
+    let mut node = mapping.parent();
+    while let Some(n) = node {
+        if matches!(n.kind(), "block_mapping_pair" | "flow_pair") {
+            let key = n
+                .child_by_field_name("key")
+                .and_then(|k| std::str::from_utf8(&bytes[k.byte_range()]).ok())
+                .map(key_token);
+            if key.as_deref() != Some("with") {
+                return false;
+            }
+            let Some(step) = n.parent() else { return false };
+            return pairs_of(step, bytes).iter().any(|(k, v)| {
+                k == "uses"
+                    && scalar_text(*v, bytes)
+                        .to_ascii_lowercase()
+                        .starts_with("actions/github-script")
+            });
+        }
+        node = n.parent();
+    }
+    false
+}
+
+/// True if `mapping` is the value of a pair keyed `key`.
+fn is_value_of(mapping: Node, key: &str, bytes: &[u8]) -> bool {
+    let mut node = mapping.parent();
+    while let Some(n) = node {
+        if matches!(n.kind(), "block_mapping_pair" | "flow_pair") {
+            return n
+                .child_by_field_name("key")
+                .and_then(|k| std::str::from_utf8(&bytes[k.byte_range()]).ok())
+                .is_some_and(|k| key_token(k) == key);
+        }
+        node = n.parent();
+    }
+    false
+}
+
+fn handle_mapping(mapping: Node, bytes: &[u8], out: &mut Vec<CodeBlock>) {
+    let pairs = pairs_of(mapping, bytes);
     let has_run = pairs.iter().any(|(k, _)| k == "run");
-    // GHA interpreter selector: a sibling `shell:` next to a `run:`.
-    let shell_lang = if has_run {
-        pairs
-            .iter()
-            .find(|(k, _)| k == "shell")
-            .and_then(|(_, v)| std::str::from_utf8(&bytes[v.byte_range()]).ok())
-            .and_then(Language::from_fence_info)
+    let run_lang = if has_run {
+        run_language(mapping, &pairs, bytes)
     } else {
         None
+    };
+    let script_lang = if is_github_script_inputs(mapping, bytes) {
+        Language::JavaScript
+    } else {
+        Language::Bash
     };
 
     for (key, value) in &pairs {
         let lang = match key.as_str() {
-            "run" => shell_lang.unwrap_or(Language::Bash),
-            "script" | "before_script" | "after_script" | "command" => Language::Bash,
+            "run" => match run_lang {
+                Some(l) => l,
+                None => continue,
+            },
+            "script" => script_lang,
+            "before_script" | "after_script" | "command" => Language::Bash,
             // `shell:` is an Ansible command key only when it is not acting as a
             // GitHub Actions selector for a sibling `run:`.
-            "shell" if !has_run => Language::Bash,
+            // Nor under `defaults: run:`, where it names the default shell.
+            "shell" if !has_run && !is_value_of(mapping, "run", bytes) => Language::Bash,
             _ => continue,
         };
         for (start, end) in value_ranges(*value, bytes) {
@@ -198,6 +336,41 @@ mod tests {
         let blocks = texts(src);
         assert_eq!(blocks.len(), 2);
         assert!(blocks.iter().all(|b| b.0 == Language::Bash));
+    }
+
+    #[test]
+    fn github_script_is_javascript() {
+        let src = "steps:\n  - uses: actions/github-script@v7\n    with:\n      script: |\n        console.log(`hi ${user}`)\n";
+        let blocks = texts(src);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, Language::JavaScript);
+        // Another action's `script:` input is still read as shell.
+        let src =
+            "steps:\n  - uses: appleboy/ssh-action@v1\n    with:\n      script: eval \"$X\"\n";
+        assert_eq!(texts(src)[0].0, Language::Bash);
+    }
+
+    #[test]
+    fn powershell_steps_are_not_read_as_bash() {
+        // Explicit shell, Windows guard, Windows runner, and defaults.
+        for src in [
+            "steps:\n  - run: $env:X=\"$(a)\"\n    shell: pwsh\n",
+            "steps:\n  - if: runner.os == 'Windows'\n    run: $env:X=\"$(a)\"\n",
+            "jobs:\n  w:\n    runs-on: windows-latest\n    steps:\n      - run: $env:X=1\n",
+            "defaults:\n  run:\n    shell: powershell\njobs:\n  w:\n    runs-on: ubuntu-latest\n    steps:\n      - run: $env:X=1\n",
+        ] {
+            assert!(texts(src).is_empty(), "{src}");
+        }
+        // A step's own shell beats the Windows runner; job defaults beat
+        // workflow defaults.
+        let src = "jobs:\n  w:\n    runs-on: windows-latest\n    steps:\n      - run: eval \"$X\"\n        shell: bash\n";
+        assert_eq!(texts(src)[0].0, Language::Bash);
+        let src = "defaults:\n  run:\n    shell: pwsh\njobs:\n  l:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash -e {0}\n    steps:\n      - run: eval \"$X\"\n";
+        assert_eq!(texts(src)[0].0, Language::Bash);
+        // Linux runners and matrices stay bash.
+        let src =
+            "jobs:\n  l:\n    runs-on: ${{ matrix.os }}\n    steps:\n      - run: eval \"$X\"\n";
+        assert_eq!(texts(src)[0].0, Language::Bash);
     }
 
     #[test]

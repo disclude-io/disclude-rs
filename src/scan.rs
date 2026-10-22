@@ -16,7 +16,7 @@ use crate::finding::{
     DiagnosticKind, FileAnalysis, Finding, ScanDiagnostic, ScanResult, Severity, SignalKind,
 };
 use crate::hidden;
-use crate::ignore::walk;
+use crate::ignore::walk_with;
 use crate::language::Language;
 use crate::package_json;
 use crate::raw;
@@ -55,6 +55,10 @@ pub struct ScanOptions {
     /// is not interruptible (its cost is bounded by the file-size ceiling), so
     /// hard deadlines belong to the host's process boundary.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// The tree may be hostile (a downloaded package, a third-party
+    /// repository): ignore files inside it are not applied, and hidden files
+    /// and directories are scanned. See [`crate::ignore::walk_with`].
+    pub untrusted: bool,
 }
 
 impl ScanOptions {
@@ -83,12 +87,13 @@ impl Default for ScanOptions {
             ignore_path: None,
             diff_ref: None,
             cancel: None,
+            untrusted: false,
         }
     }
 }
 
 pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
-    let (files, mut diagnostics) = walk(root, opts.ignore_path.as_deref());
+    let (files, mut diagnostics) = walk_with(root, opts.ignore_path.as_deref(), opts.untrusted);
 
     let outcomes: Vec<FileOutcome> = files
         .par_iter()

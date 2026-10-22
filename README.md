@@ -51,6 +51,7 @@ disclude scan <path> [options]
 | `--diff <ref>` | — | Annotate findings introduced since a git ref (`main`, a tag, a SHA) |
 | `--lang <lang>` | auto | Override language detection: `python`, `rust`, `ts`, `js`, `c`, `cpp`, `bash`/`sh`/`shell` |
 | `--ignore <file>` | — | Additional ignore file (gitignore syntax) |
+| `--untrusted` | off | The tree may be hostile (a downloaded package, someone else's repository): don't apply ignore files found in it (`.gitignore`, `.ignore`, `.discludeignore`), and scan hidden files and directories. `--ignore` still applies |
 | `--no-raw` | — | Skip raw byte analysis |
 | `--no-token` | — | Skip token-level analysis |
 | `--no-ast` | — | Skip AST analysis (faster, less precise) |
@@ -145,6 +146,7 @@ for d in &result.diagnostics {
 - **Cancellation** is checked between files. When it triggers, the result has `truncated: true` and covers only the files analysed so far. A single file's analysis can't be interrupted, so hard deadlines belong to the host process.
 - **`VERSION`**: record it with stored results. A missing finding means "not flagged by this version's signals", not "clean".
 - **Snippets are raw.** `Finding::snippet` can contain the adversarial bytes that triggered the finding (bidi controls, invisible tags). Redaction happens in the reporters, not in `scan()`. Defuse snippets before storing or displaying them.
+- **`untrusted`**: set it when the tree isn't yours. By default the walk honours ignore files in the tree (`.gitignore`, `.ignore`, `.discludeignore`) and skips hidden files, which suits scanning your own code; in a hostile tree they would let the code under review choose what is scanned. With `untrusted`, only the built-in skips (`.git/`, `node_modules/`, `target/`, `__pycache__/`, minified files, `.pyc`) and `ignore_path` apply.
 - **`diff_ref`** needs `git` on `PATH` and a checkout whose history contains both the ref and `HEAD`. A `--depth 1` clone won't resolve an older tag.
 - `SignalKind`, `Language`, `DiagnosticKind`, and the result structs are `#[non_exhaustive]`, so matches need a `_ =>` arm. Build `ScanOptions` from `Default`.
 
@@ -173,7 +175,7 @@ Text and markup files are always scanned by the raw byte-level pass (Unicode att
 | Markup | Embedded code extracted | Scanned as |
 |---|---|---|
 | Markdown | Fenced code blocks (` ```bash `, ` ```python `, …) | the fence's language |
-| YAML | GitHub Actions `run:` (honoring `shell:`), GitLab CI `script:`/`before_script:`/`after_script:`, Ansible `shell`/`command` | shell (or the selected interpreter) |
+| YAML | GitHub Actions `run:` (honoring `shell:` and `defaults.run.shell`) and `actions/github-script`'s `script:`, GitLab CI `script:`/`before_script:`/`after_script:`, Ansible `shell`/`command` | shell (or the selected interpreter); JavaScript for `github-script`. Steps that run under PowerShell or cmd (by `shell:`, `defaults.run.shell`, a Windows `runs-on`, or an `if:` on `runner.os == 'Windows'`) are not scanned as shell |
 | reStructuredText | `.. code-block:: <lang>` / `.. sourcecode:: <lang>` directive bodies | the directive's language |
 | HTML | `<script>` bodies (no `type`, or a JavaScript type), event-handler attributes (`onclick`, `onerror`, …), `javascript:` URLs in `href`/`src`/`action`/`formaction`; attribute values with character references decoded, as a browser runs them | JavaScript |
 | `.pth` | Lines Python's `site` executes at interpreter start (starting `import ` or `import\t`); other lines are paths | Python |
@@ -351,6 +353,12 @@ AST pass; language-specific.
 
 
 ## What is New
+
+### 4.3.0
+
+Added `--untrusted` (`ScanOptions::untrusted`) for scanning trees that aren't yours: ignore files inside the tree are not applied, and hidden files and directories are scanned, so a package can't hide a file from the scan by listing it in a `.discludeignore` or `.gitignore` it ships, or by naming it with a leading dot.
+
+GitHub Actions in YAML: `actions/github-script`'s `script:` is scanned as JavaScript, and steps that run under PowerShell or cmd are no longer read as shell. Scanning `.github/` (now reachable with `--untrusted`) had reported their `$env:X = "$(…)"` and template literals as dynamic shell execution.
 
 ### 4.2.0
 

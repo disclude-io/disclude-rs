@@ -78,6 +78,11 @@ struct ScanArgs {
     #[arg(long)]
     ignore: Option<PathBuf>,
 
+    /// Treat the tree as untrusted: don't apply ignore files found in it
+    /// (.gitignore, .ignore, .discludeignore), and scan hidden files.
+    #[arg(long)]
+    untrusted: bool,
+
     /// Annotate findings with recency against a git ref (e.g. `main`, a tag, a SHA).
     #[arg(long)]
     diff: Option<String>,
@@ -166,6 +171,7 @@ fn run_scan_cli(args: ScanArgs) -> anyhow::Result<u8> {
         ignore_path: args.ignore,
         diff_ref: args.diff,
         cancel: None,
+        untrusted: args.untrusted,
     };
 
     let mut result = scan::scan(&args.path, &opts)?;
