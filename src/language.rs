@@ -28,6 +28,9 @@ pub enum Language {
     /// HTML: payload-scanned; `<script>` bodies, event-handler attributes, and
     /// `javascript:` URLs extracted and scanned as JavaScript.
     Html,
+    /// Python path configuration (`.pth`): lines `site` executes at
+    /// interpreter start (`import …`) extracted and scanned as Python.
+    Pth,
 }
 
 impl Language {
@@ -48,6 +51,7 @@ impl Language {
             "yaml" | "yml" => Some(Language::Yaml),
             "rst" => Some(Language::Rst),
             "html" | "htm" | "xhtml" => Some(Language::Html),
+            "pth" => Some(Language::Pth),
             _ => None,
         }
     }
@@ -105,6 +109,7 @@ impl Language {
             "yaml" | "yml" => Some(Language::Yaml),
             "rst" => Some(Language::Rst),
             "html" | "htm" => Some(Language::Html),
+            "pth" => Some(Language::Pth),
             _ => None,
         }
     }
@@ -123,6 +128,7 @@ impl Language {
             Language::Yaml => "yaml",
             Language::Rst => "rst",
             Language::Html => "html",
+            Language::Pth => "pth",
         }
     }
 
@@ -132,7 +138,12 @@ impl Language {
     pub fn is_markup(&self) -> bool {
         matches!(
             self,
-            Language::Text | Language::Markdown | Language::Yaml | Language::Rst | Language::Html
+            Language::Text
+                | Language::Markdown
+                | Language::Yaml
+                | Language::Rst
+                | Language::Html
+                | Language::Pth
         )
     }
 

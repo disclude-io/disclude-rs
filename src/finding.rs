@@ -77,6 +77,7 @@ pub enum SignalKind {
     ReversedDecodeInput,
     // Markup structure
     HiddenLlmInstruction,
+    PthExecutableLine,
 }
 
 impl SignalKind {
@@ -137,6 +138,7 @@ impl SignalKind {
             SignalKind::EncryptedArchiveExtraction => "encrypted-archive-extraction",
             SignalKind::ReversedDecodeInput => "reversed-decode-input",
             SignalKind::HiddenLlmInstruction => "hidden-llm-instruction",
+            SignalKind::PthExecutableLine => "pth-executable-line",
         }
     }
 }

@@ -237,6 +237,7 @@ const ALL_KINDS: &[SignalKind] = &[
     SignalKind::EncryptedArchiveExtraction,
     SignalKind::ReversedDecodeInput,
     SignalKind::HiddenLlmInstruction,
+    SignalKind::PthExecutableLine,
 ];
 
 fn kind_pascal_name(k: SignalKind) -> &'static str {
@@ -296,6 +297,7 @@ fn kind_pascal_name(k: SignalKind) -> &'static str {
         SignalKind::EncryptedArchiveExtraction => "EncryptedArchiveExtraction",
         SignalKind::ReversedDecodeInput => "ReversedDecodeInput",
         SignalKind::HiddenLlmInstruction => "HiddenLlmInstruction",
+        SignalKind::PthExecutableLine => "PthExecutableLine",
     }
 }
 
@@ -421,6 +423,9 @@ fn kind_short_description(k: SignalKind) -> &'static str {
         }
         SignalKind::HiddenLlmInstruction => {
             "Instructions addressed to an AI model, placed where a page does not render them (a comment, a data attribute, a JSON data island, a hidden element)"
+        }
+        SignalKind::PthExecutableLine => {
+            "A .pth file line that Python's site module executes at every interpreter start, before any program code and whether or not the package is imported"
         }
     }
 }

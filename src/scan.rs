@@ -305,6 +305,9 @@ fn analyze_file(path: &Path, opts: &ScanOptions) -> Result<Option<FileAnalysis>>
             if language == Language::Html {
                 findings.extend(embedded::html::reference_findings(path, &bytes, &index));
             }
+            if language == Language::Pth {
+                findings.extend(embedded::pth::findings(path, &bytes, &index));
+            }
         }
         if language == Language::Html {
             demote_inline_images(&bytes, &mut findings);

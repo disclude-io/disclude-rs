@@ -166,8 +166,9 @@ Language is detected from file extension or shebang line.
 | YAML | `.yaml`, `.yml` | — |
 | reStructuredText | `.rst` | — |
 | HTML | `.html`, `.htm`, `.xhtml` | — |
+| Python path configuration | `.pth` (text; binary files such as PyTorch checkpoints are skipped) | — |
 
-Text and markup files are always scanned by the raw byte-level pass (Unicode attacks, encoded payloads, entropy). For Markdown, YAML, reStructuredText, and HTML, disclude additionally **isolates embedded code and scans it with the matching language's token and AST passes**, reporting findings at their location in the markup file:
+Text and markup files are always scanned by the raw byte-level pass (Unicode attacks, encoded payloads, entropy). For Markdown, YAML, reStructuredText, HTML, and `.pth` files, disclude additionally **isolates embedded code and scans it with the matching language's token and AST passes**, reporting findings at their location in the markup file:
 
 | Markup | Embedded code extracted | Scanned as |
 |---|---|---|
@@ -175,6 +176,7 @@ Text and markup files are always scanned by the raw byte-level pass (Unicode att
 | YAML | GitHub Actions `run:` (honoring `shell:`), GitLab CI `script:`/`before_script:`/`after_script:`, Ansible `shell`/`command` | shell (or the selected interpreter) |
 | reStructuredText | `.. code-block:: <lang>` / `.. sourcecode:: <lang>` directive bodies | the directive's language |
 | HTML | `<script>` bodies (no `type`, or a JavaScript type), event-handler attributes (`onclick`, `onerror`, …), `javascript:` URLs in `href`/`src`/`action`/`formaction`; attribute values with character references decoded, as a browser runs them | JavaScript |
+| `.pth` | Lines Python's `site` executes at interpreter start (starting `import ` or `import\t`); other lines are paths | Python |
 
 Code blocks in a language disclude does not scan (e.g. ` ```json `, plain text) are covered by the raw payload pass only.
 
@@ -344,10 +346,15 @@ AST pass; language-specific.
 |---|---|---|
 | `build-script-shellout` | critical | Rust `build.rs` spawns a shell command or makes a network request at compile time. Malicious build scripts are a known supply-chain vector — they run automatically during `cargo build`. Also elevated to critical when found alongside `unsafe` code in the same file. |
 | `proc-macro-presence` | info | Rust crate defines a procedural macro (`proc-macro = true`). Proc-macros run arbitrary code at compile time with full access to the compiler. Informational — legitimate proc-macros are common, but they warrant extra scrutiny in untrusted dependencies. |
+| `pth-executable-line` | warn | A `.pth` line that Python's `site` executes at every interpreter start, before any program code and whether or not its package is imported. Editable installs, coverage, setuptools' distutils shim, and namespace packages do this legitimately, so it is a warn; it is critical when the line, as Python, names something that runs code from data (`exec`, `eval`, `compile`), decodes or decompresses (`base64`, `zlib`, `marshal`, …), starts a process (`subprocess`, `os.system`, …), loads native code (`ctypes`), or uses the network (`socket`, `urllib`, …). Names count as identifiers and as strings that are only a name (`__import__('zlib')`), not as prose in strings. `exec('…')` on a plain string literal, how one line holds several statements, is checked by the code in the literal. The line is also scanned with the Python passes. |
 | `install-hook-shellout` | warn | `package.json` `preinstall`/`postinstall`/`install` script shells out to a non-trivial command. Runs automatically on `npm install`. |
 
 
 ## What is New
+
+### 4.2.0
+
+Added support for Python `.pth` files, and the `pth-executable-line` signal for lines Python runs at every interpreter start.
 
 ### 4.1.0
 

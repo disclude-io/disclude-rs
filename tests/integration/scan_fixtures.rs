@@ -2515,3 +2515,46 @@ fn cpp_shellout_fixture_emits_dynamic_execution_critical() {
         .collect();
     assert_eq!(lines, [10, 13, 15], "std::system, ::popen, execv");
 }
+
+#[test]
+fn pth_lines_site_executes_are_reported_and_scanned_as_python() {
+    let r = run();
+    let file = |name: &str| {
+        r.files
+            .iter()
+            .find(|fa| fa.path.to_string_lossy().ends_with(name))
+            .unwrap_or_else(|| panic!("{name} was scanned"))
+    };
+    let shim = file("pth/distutils-precedence.pth");
+    assert_eq!(shim.language, Language::Pth);
+    let kinds: Vec<_> = shim
+        .findings
+        .iter()
+        .filter(|f| f.severity >= Severity::Warn)
+        .map(|f| (f.kind, f.severity))
+        .collect();
+    assert_eq!(kinds, [(SignalKind::PthExecutableLine, Severity::Warn)]);
+
+    let payload = file("pth/startup_payload.pth");
+    let line = payload
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::PthExecutableLine)
+        .unwrap();
+    assert_eq!(
+        (line.line, line.col, line.severity),
+        (3, 1, Severity::Critical)
+    );
+    // The line is also scanned as Python, at its place in the file.
+    let blob = payload
+        .findings
+        .iter()
+        .find(|f| f.kind == SignalKind::EncodingBase64)
+        .unwrap();
+    assert_eq!(blob.line, 3);
+    assert!(
+        blob.message.starts_with("[embedded python]"),
+        "{}",
+        blob.message
+    );
+}
